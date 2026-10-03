@@ -18,7 +18,7 @@ from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from typing import Protocol
 
-from ..errors import NoAccountAvailable, UpstreamAuthError, UpstreamQuotaError
+from ..errors import NoAccountAvailable, UpstreamAuthError, UpstreamQuotaError, UpstreamTimeout
 from .model import Account, AccountStatus
 from .store import AccountStore
 
@@ -141,38 +141,53 @@ class AccountPool:
         }
 
     # ---- scheduling ----
-    def _candidates(self, exclude: Iterable[str]) -> tuple[list[Account], bool]:
-        """Returns (free candidates, whether any usable account is merely busy)."""
+    def _candidates(self, exclude: Iterable[str]) -> tuple[list[Account], bool, float | None]:
+        """Returns (free candidates, whether a usable account is merely busy, and the
+        earliest time a cooling account comes back, if any)."""
         now = time.time()
         excluded = set(exclude)
-        free, busy = [], False
+        free, busy, back_at = [], False, None
         for acc in self._accounts.values():
-            if acc.id in excluded or not acc.is_available(now):
+            if acc.id in excluded or not acc.enabled or acc.status == AccountStatus.INVALID:
+                continue
+            if not acc.is_available(now):  # cooling down
+                back_at = acc.cooldown_until if back_at is None else min(back_at, acc.cooldown_until)
                 continue
             if self._inflight[acc.id] >= self.max_concurrency:
                 busy = True
                 continue
             free.append(acc)
-        return free, busy
+        return free, busy, back_at
+
+    def has_alternative(self, exclude: Iterable[str]) -> bool:
+        """Whether an enabled, valid account exists outside ``exclude`` (busy or cooling counts)."""
+        excluded = set(exclude)
+        return any(a.id not in excluded and a.enabled and a.status != AccountStatus.INVALID
+                   for a in self._accounts.values())
 
     async def acquire(self, *, exclude: Iterable[str] = (), hint: str | None = None) -> Account:
         exclude = tuple(exclude)
         deadline = time.monotonic() + self.acquire_timeout
         async with self._cond:
             while True:
-                free, busy = self._candidates(exclude)
+                free, busy, back_at = self._candidates(exclude)
                 if free:
                     acc = self.strategy.choose(free, hint)
                     self._inflight[acc.id] += 1
                     acc.last_used_at = time.time()
                     return acc
-                if not busy:
-                    raise NoAccountAvailable("no usable account in pool")
                 remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise NoAccountAvailable("all accounts are busy, try again later")
+                back_in = None if back_at is None else back_at - time.time()
+                if not busy and back_in is None:
+                    raise NoAccountAvailable("no usable account in pool")
+                if remaining <= 0 or (not busy and back_in > remaining):
+                    # Nothing frees up before the deadline; say why instead of waiting in vain.
+                    reason = "busy" if busy else "cooling down"
+                    raise NoAccountAvailable(f"all accounts are {reason}, try again later")
+                # Wake on release, or when the soonest cooldown ends (nothing notifies that).
+                wait = remaining if back_in is None else min(remaining, max(back_in, 0.05))
                 try:
-                    await asyncio.wait_for(self._cond.wait(), timeout=remaining)
+                    await asyncio.wait_for(self._cond.wait(), timeout=wait)
                 except asyncio.TimeoutError:
                     continue
 
@@ -199,6 +214,10 @@ class AccountPool:
             acc.status = AccountStatus.COOLING
             acc.cooldown_until = time.time() + max(self.cooldown, 3600)
             log.warning("account %s out of quota, cooling down", acc.id)
+        elif isinstance(error, UpstreamTimeout):
+            # muse.ai being slow says nothing about the account; cooling it down
+            # would only fail the other requests running on it in parallel.
+            pass
         elif getattr(error, "retryable", False):
             acc.status = AccountStatus.COOLING
             acc.cooldown_until = time.time() + self.cooldown

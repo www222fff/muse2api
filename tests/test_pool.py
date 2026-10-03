@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
@@ -81,3 +82,51 @@ async def test_gateway_fails_over(tmp_path):
     assert "hi" in text
     assert pool.get("a0").status == AccountStatus.COOLING
     assert pool.get("a1").success_count == 1
+
+
+async def test_single_account_failure_keeps_original_error(tmp_path):
+    pool = await _pool(tmp_path, n=1)
+    driver = _FlakyDriver({"a0"})
+    gw = Gateway(pool, driver, max_failover=2)
+    # No other account: no pointless retry that would hide "boom" behind NoAccountAvailable.
+    with pytest.raises(UpstreamError, match="boom"):
+        _ = [d async for d in gw.chat_stream(ChatRequest(prompt="hi", model="m"))]
+    assert pool.get("a0").fail_count == 1
+
+
+async def test_acquire_waits_for_cooldown_to_end(tmp_path):
+    pool = await _pool(tmp_path, n=1)
+    acc = pool.get("a0")
+    acc.status, acc.cooldown_until = AccountStatus.COOLING, time.time() + 0.1
+    got = await pool.acquire()  # acquire_timeout is 0.2s, cooldown ends after 0.1s
+    assert got.id == "a0"
+
+
+async def test_acquire_fails_fast_when_cooldown_outlasts_timeout(tmp_path):
+    pool = await _pool(tmp_path, n=1)
+    acc = pool.get("a0")
+    acc.status, acc.cooldown_until = AccountStatus.COOLING, time.time() + 60
+    started = time.monotonic()
+    with pytest.raises(NoAccountAvailable, match="cooling"):
+        await pool.acquire()
+    assert time.monotonic() - started < 0.1
+
+
+async def test_timeout_does_not_cool_the_account(tmp_path):
+    from muse2api.errors import UpstreamTimeout
+
+    pool = await _pool(tmp_path, n=1)
+    with pytest.raises(UpstreamTimeout):
+        async with pool.lease():
+            raise UpstreamTimeout("video generation timed out")
+    acc = pool.get("a0")
+    assert acc.status == AccountStatus.ACTIVE and acc.fail_count == 1
+    assert (await pool.acquire()).id == "a0"
+
+
+async def test_other_upstream_errors_still_cool_down(tmp_path):
+    pool = await _pool(tmp_path, n=1, cooldown=30)
+    with pytest.raises(UpstreamError):
+        async with pool.lease():
+            raise UpstreamError("browser error")
+    assert pool.get("a0").status == AccountStatus.COOLING

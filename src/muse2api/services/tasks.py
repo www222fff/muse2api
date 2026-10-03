@@ -46,9 +46,12 @@ class Task(BaseModel):
 
 
 class TaskManager:
-    def __init__(self, path: Path, *, max_kept: int = 500) -> None:
+    def __init__(self, path: Path, *, max_kept: int = 500,
+                 on_finish: Callable[[Task], Awaitable[None]] | None = None) -> None:
         self.path = path
         self.max_kept = max_kept
+        # Runs in the task's own context, so it still sees the submitting request's state.
+        self.on_finish = on_finish
         self._tasks: dict[str, Task] = {}
         self._running: dict[str, asyncio.Task] = {}
 
@@ -114,6 +117,11 @@ class TaskManager:
             task.updated_at = time.time()
             self._running.pop(task.id, None)
             self._persist()
+            if self.on_finish:
+                try:
+                    await self.on_finish(task)
+                except Exception:  # noqa: BLE001
+                    log.exception("on_finish hook failed for task %s", task.id)
 
     async def cancel(self, task_id: str) -> bool:
         running = self._running.get(task_id)

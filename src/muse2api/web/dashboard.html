@@ -1,0 +1,1279 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Crect width=%2232%22 height=%2232%22 rx=%228%22 fill=%22%230b6b61%22/%3E%3C/svg%3E">
+<title>muse2api dashboard</title>
+<script>
+  // Apply the saved theme before first paint.
+  try { const t = localStorage.getItem("muse2api.theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch {}
+</script>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f3f4f1; --panel: #ffffff; --panel-2: #eef0ec; --panel-3: #e5e8e3; --border: #dadfd7; --border-strong: #c3c9c0;
+  --text: #15191b; --muted: #5f676d; --faint: #8b9398;
+  --accent: #0b6b61; --accent-hover: #095a52; --accent-text: #ffffff; --accent-soft: #dcefeb;
+  --ok: #1d7a45; --ok-bg: #e2f3e8; --warn: #9a5b00; --warn-bg: #fdf0d9; --warn-line: #e3a23b;
+  --err: #b8322f; --err-bg: #fbe6e5; --info: #2b5f9e; --info-bg: #e3edf9;
+  --bar: #0b6b61; --bar-err: #d0544f; --grid: #e6e9e4;
+  --side-bg: #11171a; --side-2: #192125; --side-border: #222c31; --side-text: #c8d1d5; --side-muted: #7a878e; --side-accent: #3fd1bd;
+  --shadow: 0 1px 2px rgba(17, 23, 26, .05);
+  --shadow-lg: 0 18px 50px rgba(10, 14, 16, .28);
+  --sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", "Helvetica Neue", sans-serif;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #0d1113; --panel: #141a1d; --panel-2: #1a2125; --panel-3: #212a2f; --border: #252e33; --border-strong: #35424a;
+    --text: #e3e8ea; --muted: #8e999f; --faint: #66727a;
+    --accent: #2fbfab; --accent-hover: #45d0bd; --accent-text: #04201c; --accent-soft: #10302c;
+    --ok: #4cc488; --ok-bg: #11291d; --warn: #f0b04f; --warn-bg: #2d2311; --warn-line: #c98a2a;
+    --err: #f06b67; --err-bg: #311817; --info: #7fb0ec; --info-bg: #142337;
+    --bar: #2fbfab; --bar-err: #f06b67; --grid: #20282c;
+    --side-bg: #090c0e; --side-2: #12181b; --side-border: #1b2226;
+    --shadow: none;
+    --shadow-lg: 0 18px 50px rgba(0, 0, 0, .6);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0d1113; --panel: #141a1d; --panel-2: #1a2125; --panel-3: #212a2f; --border: #252e33; --border-strong: #35424a;
+  --text: #e3e8ea; --muted: #8e999f; --faint: #66727a;
+  --accent: #2fbfab; --accent-hover: #45d0bd; --accent-text: #04201c; --accent-soft: #10302c;
+  --ok: #4cc488; --ok-bg: #11291d; --warn: #f0b04f; --warn-bg: #2d2311; --warn-line: #c98a2a;
+  --err: #f06b67; --err-bg: #311817; --info: #7fb0ec; --info-bg: #142337;
+  --bar: #2fbfab; --bar-err: #f06b67; --grid: #20282c;
+  --side-bg: #090c0e; --side-2: #12181b; --side-border: #1b2226;
+  --shadow: none;
+  --shadow-lg: 0 18px 50px rgba(0, 0, 0, .6);
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 var(--sans); -webkit-font-smoothing: antialiased; }
+body { min-height: 100vh; }
+button, input, select, textarea { font: inherit; color: inherit; }
+[hidden] { display: none !important; }
+svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+
+/* ---------- login ---------- */
+.login { min-height: 100vh; display: grid; place-items: center; padding: 16px;
+  background: radial-gradient(1200px 500px at 50% -10%, var(--accent-soft), transparent 70%), var(--bg); }
+.login-card { width: 100%; max-width: 380px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 26px 24px 22px; box-shadow: var(--shadow-lg); }
+.login-card .wordmark { color: var(--text); }
+.login-card h1 { font-size: 18px; margin: 18px 0 4px; letter-spacing: -.01em; }
+.login-card p { margin: 0 0 16px; color: var(--muted); font-size: 13px; }
+.login-card form { display: flex; flex-direction: column; gap: 10px; }
+.login-card .btn { justify-content: center; padding: 8px 12px; }
+
+/* ---------- shell ---------- */
+.app { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 100vh; }
+.side { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; background: var(--side-bg); color: var(--side-text); border-right: 1px solid var(--side-border); z-index: 40; }
+.wordmark { display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-weight: 700; font-size: 15px; letter-spacing: -.02em; }
+.wordmark .glyph { width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center; background: linear-gradient(140deg, #3fd1bd, #0b6b61); color: #04201c; font-size: 12px; font-weight: 800; letter-spacing: -.04em; }
+.wordmark small { display: block; font-weight: 500; font-size: 11px; color: var(--side-muted); letter-spacing: 0; }
+.login-card .wordmark small { color: var(--muted); }
+.side .wordmark { padding: 18px 18px 14px; color: #f1f5f6; }
+.health { margin: 0 12px 10px; padding: 9px 10px; border-radius: 8px; background: var(--side-2); border: 1px solid var(--side-border); display: grid; grid-template-columns: auto 1fr; gap: 0 9px; align-items: center; font-size: 12.5px; }
+.health b { font-weight: 600; color: #eef3f4; }
+.health small { grid-column: 2; color: var(--side-muted); font-size: 11.5px; }
+.pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--side-muted); position: relative; }
+.pulse.ok { background: #3ecf7f; } .pulse.warn { background: #f0b04f; } .pulse.err { background: #f06b67; }
+.pulse.ok::after { content: ""; position: absolute; inset: -4px; border-radius: 50%; border: 2px solid #3ecf7f; opacity: 0; animation: ping 2.4s ease-out infinite; }
+@keyframes ping { 0% { transform: scale(.5); opacity: .7; } 80%, 100% { transform: scale(1.5); opacity: 0; } }
+.side nav { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; flex: 1; overflow-y: auto; }
+.side .navlabel { font-size: 10.5px; text-transform: uppercase; letter-spacing: .09em; color: var(--side-muted); padding: 8px 10px 6px; font-weight: 600; }
+.side nav a { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 7px; color: var(--side-text); text-decoration: none; position: relative; font-weight: 500; }
+.side nav a:hover { background: var(--side-2); color: #fff; }
+.side nav a[aria-current="page"] { background: var(--side-2); color: #fff; }
+.side nav a[aria-current="page"]::before { content: ""; position: absolute; left: -10px; top: 7px; bottom: 7px; width: 3px; border-radius: 0 3px 3px 0; background: var(--side-accent); }
+.side nav a[aria-current="page"] svg { color: var(--side-accent); }
+.side nav .count { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--side-muted); background: rgba(255,255,255,.05); padding: 0 6px; border-radius: 9px; line-height: 18px; }
+.side nav .count.warn { color: #f0b04f; background: rgba(240,176,79,.12); }
+.side-foot { padding: 10px 12px 14px; border-top: 1px solid var(--side-border); display: flex; flex-direction: column; gap: 8px; }
+.themes { display: grid; grid-template-columns: repeat(3, 1fr); background: var(--side-2); border: 1px solid var(--side-border); border-radius: 7px; padding: 2px; }
+.themes button { background: none; border: 0; color: var(--side-muted); padding: 4px 0; border-radius: 5px; cursor: pointer; display: grid; place-items: center; }
+.themes button[aria-pressed="true"] { background: rgba(255,255,255,.08); color: #fff; }
+.side .logout { display: flex; align-items: center; gap: 9px; background: none; border: 0; color: var(--side-text); padding: 7px 10px; border-radius: 7px; cursor: pointer; text-align: left; }
+.side .logout:hover { background: var(--side-2); color: #fff; }
+.side :focus-visible { outline: 2px solid var(--side-accent); outline-offset: -2px; }
+
+.topbar { display: none; }
+.scrim { display: none; }
+main { padding: 22px 28px 48px; max-width: 1360px; width: 100%; }
+.page-head { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+.page-head h1 { margin: 0; font-size: 21px; letter-spacing: -.02em; font-weight: 680; }
+.page-head .sub { color: var(--muted); font-size: 13px; margin-top: 2px; }
+.page-head .grow { flex: 1; min-width: 200px; }
+.page-head .tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+h2 { font-size: 11.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 22px 0 8px; font-weight: 650; display: flex; align-items: center; gap: 8px; }
+h2 .link { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 500; }
+
+/* ---------- primitives ---------- */
+.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); }
+.pad { padding: 12px 14px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.btn { display: inline-flex; align-items: center; gap: 6px; background: var(--panel); border: 1px solid var(--border-strong); padding: 5px 11px; border-radius: 7px; cursor: pointer; white-space: nowrap; font-weight: 500; line-height: 20px; }
+.btn:hover { background: var(--panel-2); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+.btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.btn.big { padding: 8px 14px; font-size: 14px; }
+.btn.danger { color: var(--err); }
+.btn.danger.solid { background: var(--err); border-color: var(--err); color: #fff; }
+.btn.ghost { border-color: transparent; background: none; color: var(--muted); }
+.btn.ghost:hover { background: var(--panel-2); color: var(--text); }
+.btn.sm { padding: 2px 8px; font-size: 12.5px; line-height: 18px; border-radius: 6px; }
+.btn:disabled { opacity: .5; cursor: default; }
+a.link, button.link { color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: none; font-size: 12.5px; }
+a.link:hover, button.link:hover { text-decoration: underline; }
+input[type=text], input[type=password], select, textarea { background: var(--panel); border: 1px solid var(--border-strong); border-radius: 7px; padding: 6px 9px; min-width: 0; }
+input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visible, tr:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+label.chk { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); cursor: pointer; font-size: 13px; }
+.seg { display: inline-flex; border: 1px solid var(--border-strong); border-radius: 7px; overflow: hidden; background: var(--panel); }
+.seg button { background: none; border: 0; padding: 4px 11px; cursor: pointer; color: var(--muted); font-family: var(--mono); font-size: 12.5px; }
+.seg button + button { border-left: 1px solid var(--border); }
+.seg button[aria-pressed="true"] { background: var(--panel-3); color: var(--text); font-weight: 650; }
+.mono { font-family: var(--mono); font-size: 12px; }
+.muted { color: var(--muted); }
+.num { font-variant-numeric: tabular-nums; }
+.badge { display: inline-flex; align-items: center; gap: 5px; padding: 0 8px; border-radius: 10px; font-size: 11.5px; font-weight: 650; line-height: 20px; white-space: nowrap; }
+.badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.badge.plain::before { display: none; }
+.b-ok { background: var(--ok-bg); color: var(--ok); }
+.b-warn { background: var(--warn-bg); color: var(--warn); }
+.b-err { background: var(--err-bg); color: var(--err); }
+.b-info { background: var(--info-bg); color: var(--info); }
+.b-mute { background: var(--panel-3); color: var(--muted); }
+.warnbox, .errbox, .infobox { border-radius: 7px; padding: 8px 10px; font-size: 13px; overflow-wrap: anywhere; }
+.warnbox { background: var(--warn-bg); color: var(--warn); }
+.errbox { background: var(--err-bg); color: var(--err); }
+.infobox { background: var(--panel-2); color: var(--muted); }
+.empty { color: var(--muted); padding: 22px 16px; text-align: center; font-size: 13px; }
+
+/* ---------- tiles ---------- */
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+.tile { padding: 12px 14px 11px; position: relative; overflow: hidden; }
+.tile .k { color: var(--muted); font-size: 12px; font-weight: 550; }
+.tile .v { font-family: var(--mono); font-size: 24px; font-weight: 650; letter-spacing: -.03em; margin-top: 3px; font-variant-numeric: tabular-nums; }
+.tile .s { color: var(--muted); font-size: 12px; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile.bad .v { color: var(--err); }
+.tile.warn .v { color: var(--warn); }
+
+/* ---------- chart & lists ---------- */
+.chart { width: 100%; height: 190px; display: block; overflow: visible; }
+.chart text { fill: var(--muted); font-size: 10px; font-family: var(--mono); }
+.legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); flex-wrap: wrap; margin-top: 4px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 10px; }
+.cardhead { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--border); font-weight: 650; font-size: 13px; }
+.cardhead .link { margin-left: auto; font-weight: 500; }
+.list { font-size: 13px; padding: 4px 0; }
+.li { display: flex; gap: 10px; padding: 6px 14px; align-items: center; min-width: 0; }
+.li.click { cursor: pointer; }
+.li.click:hover { background: var(--panel-2); }
+.li .lbl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.li .meter { width: 70px; height: 6px; background: var(--panel-3); border-radius: 3px; overflow: hidden; flex: none; display: flex; }
+.li .meter b { display: block; height: 100%; background: var(--bar); }
+.li .meter b.e { background: var(--bar-err); }
+.li .n { min-width: 46px; text-align: right; font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums; flex: none; }
+.li .n.e { color: var(--err); }
+.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--faint); }
+.dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.err { background: var(--err); } .dot.info { background: var(--info); }
+
+/* ---------- tables ---------- */
+.tablewrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); white-space: nowrap; vertical-align: middle; }
+th { color: var(--muted); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; background: var(--panel-2); position: sticky; top: 0; z-index: 1; }
+thead th:first-child { border-top-left-radius: 10px; } thead th:last-child { border-top-right-radius: 10px; }
+tbody tr:last-child td { border-bottom: 0; }
+tr.click { cursor: pointer; }
+tr.click:hover td { background: var(--panel-2); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.num { font-family: var(--mono); font-size: 12.5px; }
+td.trunc { max-width: 280px; overflow: hidden; text-overflow: ellipsis; }
+td.zero { color: var(--faint); }
+td.hot { color: var(--err); font-weight: 650; }
+td .sub { color: var(--muted); font-size: 12px; max-width: 280px; overflow: hidden; text-overflow: ellipsis; }
+td.actions { text-align: right; }
+td.actions .row { flex-wrap: nowrap; justify-content: flex-end; gap: 4px; }
+tr.sep td { background: var(--panel-2); color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em; font-weight: 650; padding: 6px 12px; }
+tr.builtin td:first-child b { font-family: var(--mono); font-size: 12.5px; }
+.filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; background: var(--accent-soft); color: var(--accent); border-radius: 14px; padding: 2px 4px 2px 10px; font-size: 12.5px; font-weight: 600; }
+.chip button { background: none; border: 0; color: inherit; cursor: pointer; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; }
+.chip button:hover { background: rgba(0,0,0,.08); }
+.pager { display: flex; gap: 8px; align-items: center; justify-content: flex-end; padding: 8px 12px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); }
+.livedot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); display: inline-block; }
+.livedot.on { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-bg); }
+
+/* ---------- accounts ---------- */
+.summary { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.summary .badge { font-size: 12px; line-height: 24px; padding: 0 10px; border-radius: 12px; }
+.summary .badge b { font-family: var(--mono); }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+.acc { display: flex; flex-direction: column; position: relative; overflow: hidden; }
+.acc::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--rail, var(--border)); }
+.acc.s-active { --rail: var(--ok); } .acc.s-cooling { --rail: var(--info); } .acc.s-invalid { --rail: var(--err); } .acc.s-disabled { --rail: var(--border-strong); }
+.acc.s-quota { --rail: var(--warn-line); border-color: var(--warn-line); background: linear-gradient(180deg, var(--warn-bg), var(--panel) 90px); }
+.acc.s-disabled .acc-top, .acc.s-disabled .metrics { opacity: .65; }
+.acc-top { display: flex; align-items: flex-start; gap: 10px; padding: 12px 14px 8px 16px; }
+.acc-top .name { font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acc-top .id { color: var(--muted); font-family: var(--mono); font-size: 11.5px; }
+.acc-top .grow { flex: 1; min-width: 0; }
+.metrics { display: grid; grid-template-columns: repeat(3, 1fr); padding: 2px 14px 10px 16px; gap: 6px; }
+.metrics div { min-width: 0; }
+.metrics dt { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; }
+.metrics dd { margin: 1px 0 0; font-family: var(--mono); font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.metrics dd .f { color: var(--err); }
+.cooldown { margin: 0 14px 10px 16px; border-radius: 8px; padding: 8px 10px; display: flex; gap: 10px; align-items: center; background: var(--info-bg); color: var(--info); }
+.cooldown .t { font-family: var(--mono); font-size: 18px; font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.cooldown .w { font-size: 12px; line-height: 1.35; }
+.cooldown .w b { display: block; font-size: 12.5px; }
+.s-quota .cooldown { background: var(--warn-bg); color: var(--warn); border: 1px solid color-mix(in srgb, var(--warn-line) 55%, transparent); }
+.reason { margin: 0 14px 10px 16px; font-size: 12px; border-radius: 7px; padding: 6px 9px; overflow-wrap: anywhere; background: var(--err-bg); color: var(--err); font-family: var(--mono); line-height: 1.45; max-height: 82px; overflow-y: auto; }
+.s-quota .reason, .s-cooling .reason { background: var(--panel-2); color: var(--muted); }
+.acc-actions { display: flex; gap: 6px; padding: 9px 14px 10px 16px; border-top: 1px solid var(--border); margin-top: auto; flex-wrap: wrap; }
+.acc-actions .spacer { flex: 1; }
+.switch { position: relative; width: 34px; height: 20px; flex: none; margin-top: 1px; }
+.switch input { opacity: 0; width: 0; height: 0; position: absolute; }
+.switch span { position: absolute; inset: 0; background: var(--border-strong); border-radius: 10px; cursor: pointer; transition: background .15s; }
+.switch span::after { content: ""; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px; background: #fff; border-radius: 50%; transition: transform .15s; box-shadow: 0 1px 2px rgba(0,0,0,.25); }
+.switch input:checked + span { background: var(--ok); }
+.switch input:checked + span::after { transform: translateX(14px); }
+.switch input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ---------- modal & toast ---------- */
+.overlay { position: fixed; inset: 0; background: rgba(8, 12, 14, .5); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 60; animation: fade .12s ease-out; }
+.modal { width: 100%; max-width: 500px; max-height: calc(100vh - 32px); overflow: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow-lg); animation: rise .16s ease-out; }
+.modal.wide { max-width: 760px; }
+.modal h3 { margin: 0; padding: 15px 18px 12px; font-size: 15.5px; letter-spacing: -.01em; }
+.modal .body { padding: 2px 18px 16px; display: flex; flex-direction: column; gap: 12px; }
+.modal .body p { margin: 0; }
+.modal .actions { padding: 12px 18px; border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end; background: var(--panel-2); border-radius: 0 0 12px 12px; }
+label.f { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; color: var(--muted); font-weight: 550; }
+label.f input, label.f textarea { color: var(--text); font-size: 14px; font-weight: 400; padding: 7px 10px; }
+label.f .hint { font-weight: 400; color: var(--faint); font-size: 12px; }
+.ferr { color: var(--err); font-size: 12.5px; }
+.secret { display: flex; gap: 8px; }
+.secret input { flex: 1; font-family: var(--mono); font-size: 13px; background: var(--panel-2); }
+.usage-hint { font-family: var(--mono); font-size: 12px; background: var(--panel-2); border: 1px dashed var(--border-strong); border-radius: 7px; padding: 8px 10px; overflow-wrap: anywhere; color: var(--muted); }
+dl.kv { display: grid; grid-template-columns: max-content 1fr; gap: 5px 16px; margin: 0; font-size: 13px; }
+dl.kv dt { color: var(--muted); }
+dl.kv dd { margin: 0; overflow-wrap: anywhere; font-family: var(--mono); font-size: 12px; }
+#toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 9px 16px; border-radius: 8px; font-size: 13px; z-index: 70; max-width: calc(100vw - 32px); box-shadow: var(--shadow-lg); animation: rise .15s ease-out; }
+@keyframes fade { from { opacity: 0; } }
+@keyframes rise { from { opacity: 0; transform: translateY(6px); } }
+#toast { animation-name: toastin; }
+@keyframes toastin { from { opacity: 0; transform: translate(-50%, 6px); } }
+.page { animation: fade .18s ease-out; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+
+/* ---------- narrow screens ---------- */
+@media (max-width: 860px) {
+  .app { grid-template-columns: minmax(0, 1fr); }
+  .side { position: fixed; left: 0; top: 0; bottom: 0; width: 264px; max-width: 84vw; transform: translateX(-102%); transition: transform .2s ease; box-shadow: var(--shadow-lg); }
+  .app.drawer .side { transform: none; }
+  .app.drawer .scrim { display: block; position: fixed; inset: 0; background: rgba(8,12,14,.5); z-index: 35; }
+  .topbar { display: flex; position: sticky; top: 0; z-index: 30; align-items: center; gap: 10px; padding: 8px 12px; background: var(--side-bg); color: #eef3f4; border-bottom: 1px solid var(--side-border); }
+  .topbar .burger { background: none; border: 0; color: inherit; width: 36px; height: 36px; border-radius: 8px; display: grid; place-items: center; cursor: pointer; }
+  .topbar .burger:hover { background: var(--side-2); }
+  .topbar .burger svg { width: 20px; height: 20px; }
+  .topbar .title { font-weight: 650; flex: 1; }
+  .topbar .pulse { margin-right: 6px; }
+  main { padding: 16px 16px 40px; }
+  .page-head h1 { font-size: 19px; }
+}
+@media (max-width: 640px) {
+  .tile .v { font-size: 20px; }
+  .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .grid2 { grid-template-columns: minmax(0, 1fr); }
+  .hide-sm { display: none; }
+  .filters > select, .filters > input[type=text] { flex: 1 1 140px; }
+  .cards { grid-template-columns: minmax(0, 1fr); }
+  .page-head .tools { width: 100%; }
+  .page-head .tools .btn.big { flex: 1; justify-content: center; }
+  /* The keys table turns into stacked cards. */
+  table.resp thead { display: none; }
+  table.resp tr { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 10px; padding: 11px 14px; border-bottom: 1px solid var(--border); }
+  table.resp tbody tr:last-child { border-bottom: 0; }
+  table.resp td { border: 0; padding: 0; white-space: normal; text-align: left; }
+  table.resp td[data-label]::before { content: attr(data-label); display: block; font: 600 10.5px/1.5 var(--sans); text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  table.resp td.cell-name { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; }
+  table.resp td.cell-name > div { flex: 1; min-width: 0; }
+  table.resp td.cell-status { order: -1; display: none; }
+  table.resp td.cell-name .m-status { display: inline-flex; }
+  table.resp td.actions { grid-column: 1 / -1; }
+  table.resp td.actions .row { justify-content: flex-start; flex-wrap: wrap; }
+  table.resp tr.sep { display: block; padding: 6px 14px; }
+  table.resp tr.sep td { background: none; padding: 0; }
+  table.resp tr.sep { background: var(--panel-2); }
+}
+.m-status { display: none; }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-overview" viewBox="0 0 24 24"><rect x="3" y="3" width="7.5" height="9" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="5" rx="1.5"/><rect x="13.5" y="11" width="7.5" height="10" rx="1.5"/><rect x="3" y="15" width="7.5" height="6" rx="1.5"/></symbol>
+  <symbol id="i-accounts" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.6-3.6 3.2-5.5 6.5-5.5s5.9 1.9 6.5 5.5"/><path d="M16 4.6a3.5 3.5 0 0 1 0 6.8M18.5 14.8c1.7.7 2.7 2.4 3 5.2"/></symbol>
+  <symbol id="i-keys" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4.5"/><path d="M11.2 11.8 20 3M16.5 6.5l2.5 2.5M14 9l2 2"/></symbol>
+  <symbol id="i-requests" viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h13"/><circle cx="19" cy="12" r="1.2"/></symbol>
+  <symbol id="i-logout" viewBox="0 0 24 24"><path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4M10 16l-4-4 4-4M6 12h10"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="i-auto" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 4v16a8 8 0 0 0 0-16Z" fill="currentColor"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5Z"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.6M20 4v4.5h-4.5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></symbol>
+</svg>
+
+<!-- login screen -->
+<div class="login" id="login" hidden>
+  <div class="login-card">
+    <div class="wordmark"><span class="glyph">m2a</span><span>muse2api<small>Bảng điều khiển quản trị</small></span></div>
+    <h1>Đăng nhập</h1>
+    <p>Nhập admin key (<span class="mono">MUSE2API_ADMIN_KEY</span>). Key được lưu trong local storage của trình duyệt này.</p>
+    <form id="login-form" autocomplete="on">
+      <input type="text" name="username" value="admin" autocomplete="username" hidden>
+      <label class="f">Admin key<input type="password" id="login-key" autocomplete="current-password" required></label>
+      <div class="errbox" id="login-err" hidden></div>
+      <button class="btn primary" type="submit" id="login-btn">Đăng nhập</button>
+    </form>
+  </div>
+</div>
+
+<div class="app" id="app" hidden>
+  <aside class="side" id="side" aria-label="Điều hướng">
+    <div class="wordmark"><span class="glyph" aria-hidden="true">m2a</span><span>muse2api<small id="version">admin</small></span></div>
+    <div class="health" id="health" role="status" aria-live="polite">
+      <span class="pulse" id="health-dot"></span><b id="health-text">Đang kiểm tra…</b><small id="health-sub">&nbsp;</small>
+    </div>
+    <nav>
+      <div class="navlabel">Quản lý</div>
+      <a href="#overview" data-page="overview"><svg class="i"><use href="#i-overview"/></svg>Tổng quan</a>
+      <a href="#accounts" data-page="accounts"><svg class="i"><use href="#i-accounts"/></svg>Accounts<span class="count" id="nav-accounts"></span></a>
+      <a href="#keys" data-page="keys"><svg class="i"><use href="#i-keys"/></svg>API Keys<span class="count" id="nav-keys"></span></a>
+      <a href="#requests" data-page="requests"><svg class="i"><use href="#i-requests"/></svg>Requests</a>
+    </nav>
+    <div class="side-foot">
+      <div class="themes" role="group" aria-label="Giao diện">
+        <button type="button" data-theme="auto" title="Theo hệ thống" aria-label="Theo hệ thống"><svg class="i"><use href="#i-auto"/></svg></button>
+        <button type="button" data-theme="light" title="Sáng" aria-label="Sáng"><svg class="i"><use href="#i-sun"/></svg></button>
+        <button type="button" data-theme="dark" title="Tối" aria-label="Tối"><svg class="i"><use href="#i-moon"/></svg></button>
+      </div>
+      <button type="button" class="logout" id="signout"><svg class="i"><use href="#i-logout"/></svg>Đăng xuất</button>
+    </div>
+  </aside>
+  <div class="scrim" id="scrim"></div>
+
+  <div class="shell">
+    <header class="topbar">
+      <button type="button" class="burger" id="burger" aria-label="Mở menu" aria-controls="side" aria-expanded="false"><svg class="i"><use href="#i-menu"/></svg></button>
+      <span class="title" id="top-title">Tổng quan</span>
+      <span class="pulse" id="top-dot" aria-hidden="true"></span>
+    </header>
+
+    <main>
+      <!-- overview -->
+      <section class="page" id="page-overview" hidden>
+        <div class="page-head">
+          <div class="grow"><h1>Tổng quan</h1><div class="sub">Lưu lượng <span class="mono">/v1/*</span>, không tính các lần poll task.</div></div>
+          <div class="tools">
+            <div class="seg" id="window" role="group" aria-label="Khoảng thời gian">
+              <button type="button" data-w="1h" aria-pressed="false">1h</button>
+              <button type="button" data-w="24h" aria-pressed="true">24h</button>
+              <button type="button" data-w="7d" aria-pressed="false">7d</button>
+            </div>
+            <button class="btn" id="ov-refresh" type="button"><svg class="i"><use href="#i-refresh"/></svg>Làm mới</button>
+          </div>
+        </div>
+        <div class="tiles" id="tiles"></div>
+        <h2>Requests theo thời gian</h2>
+        <div class="panel pad">
+          <div id="chart"></div>
+          <div class="legend"><span><i style="background: var(--bar)"></i>Thành công</span><span><i style="background: var(--bar-err)"></i>Lỗi (4xx/5xx hoặc task failed)</span><span id="bucket-note"></span></div>
+        </div>
+        <div class="grid2" style="margin-top: 10px;">
+          <div class="panel"><div class="cardhead">Top API keys<a class="link" href="#keys">Quản lý keys</a></div><div class="list" id="ov-keys"></div></div>
+          <div class="panel"><div class="cardhead">Accounts<a class="link" href="#accounts">Xem tất cả</a></div><div class="list" id="ov-accounts"></div></div>
+          <div class="panel"><div class="cardhead">Theo model</div><div class="list" id="ov-models"></div></div>
+          <div class="panel"><div class="cardhead">Theo status code</div><div class="list" id="ov-status"></div></div>
+        </div>
+      </section>
+
+      <!-- accounts -->
+      <section class="page" id="page-accounts" hidden>
+        <div class="page-head">
+          <div class="grow"><h1>Accounts</h1><div class="sub">Các tài khoản muse.ai trong pool. Account hết quota sẽ tự quay lại khi hết thời gian nghỉ.</div></div>
+          <div class="tools"><button class="btn" id="acc-refresh" type="button"><svg class="i"><use href="#i-refresh"/></svg>Làm mới</button></div>
+        </div>
+        <div class="summary" id="acc-summary"></div>
+        <div class="cards" id="accounts"></div>
+      </section>
+
+      <!-- keys -->
+      <section class="page" id="page-keys" hidden>
+        <div class="page-head">
+          <div class="grow"><h1>API Keys</h1><div class="sub">Key cho client gọi <span class="mono">/v1/*</span>. Server chỉ lưu bản băm — key chỉ hiển thị một lần khi cấp.</div></div>
+          <div class="tools"><button class="btn primary big" id="key-new" type="button"><svg class="i"><use href="#i-plus"/></svg>Cấp API key</button></div>
+        </div>
+        <div class="tiles" id="key-tiles" style="margin-bottom: 12px;"></div>
+        <div class="panel">
+          <div class="tablewrap">
+            <table class="resp">
+              <thead><tr>
+                <th>Name</th><th class="hide-sm">Key</th><th>Status</th><th class="num">Total</th><th class="num">24h</th><th class="num">Errors 24h</th><th>Last request</th><th class="hide-sm">Created</th><th></th>
+              </tr></thead>
+              <tbody id="keys-body"></tbody>
+            </table>
+          </div>
+        </div>
+        <p class="muted" style="font-size: 12px; margin: 8px 2px 0;">Số liệu lấy từ request log (giữ lại theo cấu hình retention), không tính poll. Bấm vào một dòng để xem requests của key đó.</p>
+      </section>
+
+      <!-- requests -->
+      <section class="page" id="page-requests" hidden>
+        <div class="page-head">
+          <div class="grow"><h1>Requests</h1><div class="sub">Nhật ký từng request tới <span class="mono">/v1/*</span>. Bấm một dòng để xem chi tiết.</div></div>
+          <div class="tools"><label class="chk"><input type="checkbox" id="f-live" checked> <span class="livedot on" id="live-dot"></span> Tự động làm mới</label></div>
+        </div>
+        <div class="filters">
+          <select id="f-key" aria-label="Key"></select>
+          <select id="f-account" aria-label="Account"></select>
+          <select id="f-status" aria-label="Status">
+            <option value="">Mọi status</option>
+            <option value="2xx">2xx</option>
+            <option value="4xx">4xx</option>
+            <option value="5xx">5xx</option>
+            <option value="failed">Lỗi (gồm task failed)</option>
+          </select>
+          <input type="text" id="f-path" placeholder="Path, ví dụ /v1/chat" aria-label="Path prefix">
+          <label class="chk"><input type="checkbox" id="f-polls" checked> Ẩn poll</label>
+          <span id="f-chips" class="row"></span>
+        </div>
+        <div class="panel">
+          <div class="tablewrap">
+            <table>
+              <thead><tr>
+                <th>Time</th><th>Method</th><th>Path</th><th class="hide-sm">Model</th><th>Key</th>
+                <th class="hide-sm">Account</th><th class="num">Status</th><th class="num">Latency</th><th class="hide-sm">Client</th>
+              </tr></thead>
+              <tbody id="req-body"></tbody>
+            </table>
+          </div>
+          <div class="pager">
+            <span id="req-range"></span>
+            <button class="btn sm" id="req-prev" type="button">Mới hơn</button>
+            <button class="btn sm" id="req-next" type="button">Cũ hơn</button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+
+<div class="overlay" id="overlay" hidden>
+  <div class="modal" id="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <h3 id="modal-title"></h3>
+    <div class="body" id="modal-body"></div>
+    <div class="actions" id="modal-actions"></div>
+  </div>
+</div>
+<div id="toast" role="status" hidden></div>
+
+<script>
+"use strict";
+(() => {
+  const STORE = "muse2api.adminKey";
+  const $ = (sel, root = document) => root.querySelector(sel);
+  const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+  const PAGES = {overview: "Tổng quan", accounts: "Accounts", keys: "API Keys", requests: "Requests"};
+  const state = {
+    page: "overview", window: "24h", offset: 0, limit: 50,
+    accounts: [], keys: [], builtin: [], capabilities: {}, timer: null, modalOpen: false,
+  };
+
+  // ---- helpers ----
+  const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+  const store = {
+    get: (k) => { try { return localStorage.getItem(k) || ""; } catch { return ""; } },
+    set: (k, v) => { try { v ? localStorage.setItem(k, v) : localStorage.removeItem(k); } catch {} },
+  };
+  const getKey = () => store.get(STORE);
+  const setKey = (k) => store.set(STORE, k);
+  const now = () => Date.now() / 1000;
+  const fmtNum = (n) => n == null ? "–" : Number(n).toLocaleString("en-US");
+  const fmtMs = (ms) => ms == null ? "–" : ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(ms < 10000 ? 2 : 1)} s`;
+  const fmtPct = (r) => `${(r * 100).toFixed(r && r < 0.1 ? 2 : 1)}%`;
+  const icon = (name) => `<svg class="i"><use href="#i-${name}"/></svg>`;
+  function ago(ts) {
+    if (!ts) return "chưa dùng";
+    const s = Math.max(0, now() - ts);
+    if (s < 10) return "vừa xong";
+    if (s < 60) return `${Math.floor(s)} giây trước`;
+    if (s < 3600) return `${Math.floor(s / 60)} phút trước`;
+    if (s < 86400) return `${Math.floor(s / 3600)} giờ trước`;
+    return `${Math.floor(s / 86400)} ngày trước`;
+  }
+  function countdown(sec) {
+    sec = Math.max(0, Math.ceil(sec));
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    const pad = (x) => String(x).padStart(2, "0");
+    return h ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+  }
+  function clock(ts) {
+    const d = new Date(ts * 1000);
+    const today = new Date().toDateString() === d.toDateString();
+    return today ? d.toLocaleTimeString([], {hour12: false})
+      : d.toLocaleString([], {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false});
+  }
+  const fullTime = (ts) => ts ? new Date(ts * 1000).toLocaleString() : "–";
+  function statusBadge(code) {
+    const cls = code >= 500 ? "b-err" : code >= 400 ? "b-warn" : "b-ok";
+    return `<span class="badge plain ${cls} mono">${esc(code)}</span>`;
+  }
+  // Async submits answer 200 at once; the task's own outcome is what the client got.
+  const TASK_BADGE = { succeeded: ["b-ok", "ok"], failed: ["b-err", "failed"],
+                       cancelled: ["b-mute", "cancelled"] };
+  function taskBadge(r) {
+    if (r.poll || !r.task_id) return "";
+    const [cls, txt] = TASK_BADGE[r.task_status] || ["b-info", "running"];
+    return ` <span class="badge plain ${cls}">${esc(txt)}</span>`;
+  }
+  function accountLabel(id) {
+    if (!id) return "";
+    const a = state.accounts.find((x) => x.id === id);
+    return a && a.label ? a.label : id;
+  }
+  function keyLabel(id, fallback) {
+    if (!id) return fallback || "(không xác thực)";
+    const k = state.keys.find((x) => x.id === id);
+    return k ? k.name : (fallback || id);
+  }
+  let toastTimer;
+  function toast(msg) {
+    const t = $("#toast");
+    t.textContent = msg;
+    t.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { t.hidden = true; }, 2800);
+  }
+
+  class AuthError extends Error {}
+  async function api(path, opts = {}) {
+    const headers = {Authorization: `Bearer ${getKey()}`};
+    if (opts.body !== undefined) headers["Content-Type"] = "application/json";
+    const res = await fetch(path, {method: opts.method || "GET", headers,
+      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined});
+    if (res.status === 401) throw new AuthError("unauthorized");
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((data.error && data.error.message) || `HTTP ${res.status}`);
+    return data;
+  }
+  async function guarded(fn) {
+    try { return await fn(); }
+    catch (e) {
+      if (e instanceof AuthError) { setKey(""); stop(); showLogin("Admin key không hợp lệ hoặc đã bị đổi."); }
+      else toast(e.message || String(e));
+    }
+  }
+
+  // ---- theme ----
+  function applyTheme(t) {
+    if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+    else delete document.documentElement.dataset.theme;
+    store.set("muse2api.theme", t === "auto" ? "" : t);
+    for (const b of $$(".themes button")) b.setAttribute("aria-pressed", String(b.dataset.theme === (t || "auto")));
+  }
+  for (const b of $$(".themes button")) b.addEventListener("click", () => applyTheme(b.dataset.theme));
+  applyTheme(store.get("muse2api.theme") || "auto");
+
+  // ---- modal (in-page; never window.confirm/alert) ----
+  // Each action: {label, value, cls, primary, collect(), check(value) -> error string}.
+  function modal({title, body, actions, wide}) {
+    const opener = document.activeElement;
+    return new Promise((resolve) => {
+      $("#modal-title").textContent = title;
+      $("#modal-body").innerHTML = body;
+      $("#modal").classList.toggle("wide", !!wide);
+      const box = $("#modal-actions");
+      box.innerHTML = "";
+      const cancellable = actions.some((a) => a.value === null && !a.collect);
+      const close = (v) => {
+        $("#overlay").hidden = true;
+        state.modalOpen = false;
+        document.removeEventListener("keydown", onKey, true);
+        $("#overlay").removeEventListener("mousedown", onBackdrop);
+        if (opener && opener.focus && document.contains(opener)) opener.focus();
+        resolve(v);
+      };
+      const fire = (a) => {
+        const v = a.collect ? a.collect() : a.value;
+        const err = a.check && a.check(v);
+        if (err) {
+          let el = $("#modal-err");
+          if (!el) { el = document.createElement("div"); el.id = "modal-err"; el.className = "ferr"; el.setAttribute("role", "alert"); $("#modal-body").appendChild(el); }
+          el.textContent = err;
+          return;
+        }
+        close(v);
+      };
+      const onKey = (e) => {
+        if (e.key === "Escape" && cancellable) { e.preventDefault(); close(null); }
+        else if (e.key === "Enter" && e.target.tagName === "INPUT" && e.target.type !== "checkbox") {
+          const primary = actions.find((a) => a.primary);
+          if (primary) { e.preventDefault(); fire(primary); }
+        } else if (e.key === "Tab") {
+          // Keep focus inside the dialog.
+          const f = $$("#modal input:not([type=hidden]), #modal button, #modal textarea, #modal select").filter((x) => !x.disabled && x.offsetParent);
+          if (!f.length) return;
+          const first = f[0], last = f[f.length - 1];
+          if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+          else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+        }
+      };
+      const onBackdrop = (e) => { if (e.target === $("#overlay") && cancellable) close(null); };
+      for (const a of actions) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = `btn ${a.cls || ""}`;
+        b.textContent = a.label;
+        b.addEventListener("click", () => fire(a));
+        box.appendChild(b);
+      }
+      document.addEventListener("keydown", onKey, true);
+      $("#overlay").addEventListener("mousedown", onBackdrop);
+      $("#overlay").hidden = false;
+      state.modalOpen = true;
+      const focus = $("#modal-body input:not([readonly])") || box.lastElementChild;
+      if (focus) focus.focus();
+    });
+  }
+  const confirmBox = (title, html, label = "Xác nhận", danger = true) => modal({
+    title, body: html,
+    actions: [{label: "Huỷ", value: null}, {label, value: true, primary: true, cls: danger ? "danger solid" : "primary"}],
+  });
+
+  // ---- login ----
+  function showLogin(message) {
+    $("#app").hidden = true;
+    $("#login").hidden = false;
+    $("#login-err").hidden = !message;
+    $("#login-err").textContent = message || "";
+    $("#login-key").value = "";
+    $("#login-key").focus();
+  }
+  $("#login-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const key = $("#login-key").value.trim();
+    if (!key) return;
+    $("#login-btn").disabled = true;
+    setKey(key);
+    try { await api("/admin/status"); start(); }
+    catch (err) { setKey(""); showLogin(err instanceof AuthError ? "Admin key không đúng." : err.message); }
+    finally { $("#login-btn").disabled = false; }
+  });
+
+  // ---- shared status / health ----
+  function updateHealth(st, failed) {
+    let cls = "ok", text = "Hoạt động", sub = "";
+    if (failed) { cls = "err"; text = "Mất kết nối"; sub = "Không gọi được /admin/status"; }
+    else {
+      const pool = st.accounts || {}, drv = st.driver || {};
+      sub = `${fmtNum(pool.available)}/${fmtNum(pool.total)} accounts sẵn sàng`;
+      if (drv.ok === false) { cls = "err"; text = "Driver lỗi"; sub = `driver ${drv.driver || ""}`; }
+      else if (!pool.total) { cls = "warn"; text = "Chưa có account"; }
+      else if (!pool.available) { cls = "warn"; text = "Không account nào sẵn sàng"; }
+      else if (pool.available < pool.total) { text = "Hoạt động"; }
+    }
+    for (const d of [$("#health-dot"), $("#top-dot")]) d.className = `pulse ${cls}`;
+    $("#health-text").textContent = text;
+    $("#health-sub").textContent = sub;
+    $("#top-dot").title = `${text} · ${sub}`;
+  }
+
+  async function loadAccounts() {
+    let st, acc;
+    try { [st, acc] = await Promise.all([api("/admin/status"), api("/admin/accounts")]); }
+    catch (e) { if (!(e instanceof AuthError)) updateHealth(null, true); throw e; }
+    state.capabilities = st.capabilities || {};
+    state.accounts = acc.data || [];
+    state.pool = st.accounts || {};
+    $("#version").textContent = `v${st.version} · ${(st.driver && st.driver.driver) || ""}`;
+    updateHealth(st);
+    const t = now();
+    const ready = state.accounts.filter((a) => accState(a, t).cls === "ok").length, total = state.accounts.length;
+    const nav = $("#nav-accounts");
+    nav.textContent = total ? (ready < total ? `${ready}/${total}` : total) : "";
+    nav.classList.toggle("warn", ready < total);
+    nav.title = ready < total ? `${ready}/${total} account đang hoạt động` : "";
+    return st;
+  }
+
+  // ---- accounts ----
+  const isQuota = (a) => /quota|credit|out of (usage|messages)|limit reached|exhaust/i.test(a.last_error || "");
+  function accState(a, t) {
+    if (!a.enabled) return {key: "disabled", label: "đã tắt", cls: "mute", badge: "b-mute"};
+    if (a.status === "invalid") return {key: "invalid", label: "lỗi phiên", cls: "err", badge: "b-err"};
+    if (a.status === "cooling" && a.cooldown_until > t) {
+      return isQuota(a) ? {key: "quota", label: "hết quota", cls: "warn", badge: "b-warn"}
+        : {key: "cooling", label: "đang nghỉ", cls: "info", badge: "b-info"};
+    }
+    return {key: "active", label: "hoạt động", cls: "ok", badge: "b-ok"};
+  }
+
+  function accountCard(a) {
+    const t = now(), s = accState(a, t);
+    const cooling = s.key === "quota" || s.key === "cooling";
+    const name = a.label || a.id;
+    return `<article class="panel acc s-${s.key}" data-id="${esc(a.id)}">
+      <div class="acc-top">
+        <div class="grow">
+          <div class="name" title="${esc(name)}">${esc(name)}</div>
+          <div class="id">${esc(a.id)}</div>
+        </div>
+        <span class="badge ${s.badge}">${esc(s.label)}</span>
+        <label class="switch" title="${a.enabled ? "Đang bật — bấm để tắt" : "Đang tắt — bấm để bật"}"><input type="checkbox" data-act="toggle" ${a.enabled ? "checked" : ""} aria-label="Bật account ${esc(name)}"><span></span></label>
+      </div>
+      <dl class="metrics">
+        <div><dt>Thành công</dt><dd>${fmtNum(a.success_count)}</dd></div>
+        <div><dt>Thất bại</dt><dd>${a.fail_count ? `<span class="f">${fmtNum(a.fail_count)}</span>` : "0"}</dd></div>
+        <div><dt>Dùng lần cuối</dt><dd title="${esc(fullTime(a.last_used_at))}" data-ago="${esc(a.last_used_at || 0)}">${esc(ago(a.last_used_at))}</dd></div>
+      </dl>
+      ${cooling ? `<div class="cooldown">
+          <span class="t" data-until="${esc(a.cooldown_until)}">${esc(countdown(a.cooldown_until - t))}</span>
+          <span class="w"><b>${s.key === "quota" ? "Hết quota" : "Tạm nghỉ"}</b>Tự động dùng lại lúc ${esc(new Date(a.cooldown_until * 1000).toLocaleTimeString([], {hour12: false}))}</span>
+        </div>` : ""}
+      ${a.last_error ? `<div class="reason" title="last_error">${esc(a.last_error)}</div>` : ""}
+      <div class="acc-actions">
+        ${state.capabilities.renew_session ? `<button class="btn sm" type="button" data-act="renew">Gia hạn</button>` : ""}
+        <button class="btn sm" type="button" data-act="reset" ${s.key === "active" && !a.last_error ? "disabled" : ""} title="Xoá cooldown và lỗi, đưa về trạng thái hoạt động">Đặt lại</button>
+        <button class="btn sm ghost" type="button" data-act="requests">Requests</button>
+        <span class="spacer"></span>
+        <button class="btn sm danger" type="button" data-act="delete">Xoá</button>
+      </div>
+    </article>`;
+  }
+
+  function renderAccounts() {
+    const t = now(), counts = {active: 0, quota: 0, cooling: 0, invalid: 0, disabled: 0};
+    for (const a of state.accounts) counts[accState(a, t).key] += 1;
+    const chip = (k, label, badge) => counts[k] ? `<span class="badge ${badge}">${label} <b>${counts[k]}</b></span>` : "";
+    $("#acc-summary").innerHTML = state.accounts.length ? [
+      chip("active", "Hoạt động", "b-ok"), chip("quota", "Hết quota", "b-warn"), chip("cooling", "Đang nghỉ", "b-info"),
+      chip("invalid", "Lỗi phiên", "b-err"), chip("disabled", "Đã tắt", "b-mute"),
+    ].join("") : "";
+    // Problems first, then by label.
+    const order = {quota: 0, invalid: 1, cooling: 2, active: 3, disabled: 4};
+    const list = [...state.accounts].sort((a, b) => (order[accState(a, t).key] - order[accState(b, t).key])
+      || (a.label || a.id).localeCompare(b.label || b.id));
+    $("#accounts").innerHTML = list.map(accountCard).join("")
+      || `<div class="panel empty">Chưa có account nào. Thêm account bằng <span class="mono">POST /admin/accounts</span> hoặc script import cookies.</div>`;
+  }
+  async function loadAccountsPage() { await loadAccounts(); renderAccounts(); }
+
+  $("#accounts").addEventListener("change", (e) => {
+    const input = e.target.closest("input[data-act=toggle]");
+    if (!input) return;
+    const id = input.closest("[data-id]").dataset.id;
+    guarded(async () => {
+      await api(`/admin/accounts/${encodeURIComponent(id)}`, {method: "PATCH", body: {enabled: input.checked}});
+      toast(input.checked ? "Đã bật account" : "Đã tắt account");
+      await loadAccountsPage();
+    });
+  });
+  $("#accounts").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-act]");
+    if (!btn) return;
+    const id = btn.closest("[data-id]").dataset.id;
+    const a = state.accounts.find((x) => x.id === id);
+    const act = btn.dataset.act;
+    if (act === "requests") return go("requests", {account: id});
+    guarded(async () => {
+      const path = `/admin/accounts/${encodeURIComponent(id)}`;
+      if (act === "delete") {
+        const name = a ? (a.label || a.id) : id;
+        if (!await confirmBox("Xoá account?", `<p>Xoá vĩnh viễn <b>${esc(name)}</b> (<span class="mono">${esc(id)}</span>) khỏi pool, kể cả cookies đã lưu. Lịch sử request vẫn được giữ.</p>`, "Xoá account")) return;
+        await api(path, {method: "DELETE"});
+        toast("Đã xoá account");
+      } else {
+        btn.disabled = true;
+        try {
+          const res = await api(`${path}/${act}`, {method: "POST"});
+          if (act === "renew") toast(res.ok ? "Đã gia hạn phiên" : `Gia hạn thất bại: ${res.error || "lỗi không rõ"}`);
+          else toast("Đã đặt lại account");
+        } finally { btn.disabled = false; }
+      }
+      await loadAccountsPage();
+    });
+  });
+  $("#acc-refresh").addEventListener("click", () => guarded(loadAccountsPage));
+
+  // ---- overview ----
+  function tile(k, v, s = "", cls = "") {
+    return `<div class="panel tile ${cls}"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div><div class="s" title="${esc(s)}">${esc(s)}</div></div>`;
+  }
+
+  function chart(series, bucket) {
+    // Drawn at the container's real width so text is never stretched.
+    const W = Math.max(240, $("#chart").clientWidth), H = 190, L = 34, B = 18, T = 6;
+    const max = Math.max(1, ...series.map((p) => p.count));
+    const nice = (() => { const p = Math.pow(10, Math.floor(Math.log10(max))); for (const m of [1, 2, 5, 10]) if (m * p >= max) return m * p; return max; })();
+    const bw = (W - L) / series.length;
+    const y = (v) => H - B - (v / nice) * (H - B - T);
+    let out = "";
+    for (const f of [0, 0.5, 1]) {
+      const yy = y(nice * f);
+      out += `<line x1="${L}" x2="${W}" y1="${yy}" y2="${yy}" stroke="var(--grid)"/>`;
+      out += `<text x="${L - 6}" y="${yy + 3}" text-anchor="end">${fmtNum(nice * f)}</text>`;
+    }
+    series.forEach((p, i) => {
+      const x = L + i * bw + bw * 0.14, w = Math.max(1, bw * 0.72);
+      const ok = p.count - p.errors;
+      const label = `${clock(p.t)}: ${p.count} requests, ${p.errors} lỗi`;
+      if (p.count) {
+        out += `<g><title>${esc(label)}</title>`;
+        if (ok) out += `<rect x="${x}" y="${y(p.count)}" width="${w}" height="${y(p.errors) - y(p.count)}" fill="var(--bar)" rx="1"/>`;
+        if (p.errors) out += `<rect x="${x}" y="${y(p.errors)}" width="${w}" height="${y(0) - y(p.errors)}" fill="var(--bar-err)" rx="1"/>`;
+        out += `</g>`;
+      }
+    });
+    const ticks = Math.max(2, Math.floor(W / 110)), step = Math.max(1, Math.round(series.length / ticks));
+    for (let i = 0; i < series.length; i += step) {
+      const d = new Date(series[i].t * 1000);
+      const txt = bucket >= 3 * 3600 ? d.toLocaleDateString([], {month: "short", day: "numeric"})
+        : d.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", hour12: false});
+      out += `<text x="${L + i * bw + bw / 2}" y="${H - 4}" text-anchor="middle">${esc(txt)}</text>`;
+    }
+    return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Requests theo thời gian">${out}</svg>`;
+  }
+
+  function meterList(rows, label, opts = {}) {
+    const max = Math.max(1, ...rows.map((r) => r.count));
+    return rows.slice(0, opts.limit || 6).map((r) => {
+      const okW = ((r.count - (r.errors || 0)) / max) * 100, errW = ((r.errors || 0) / max) * 100;
+      const attrs = opts.attrs ? opts.attrs(r) : "";
+      return `<div class="li${attrs ? " click" : ""}" ${attrs}>
+        <span class="lbl" title="${esc(label(r))}">${esc(label(r))}</span>
+        <span class="meter" aria-hidden="true"><b style="width:${okW}%"></b><b class="e" style="width:${errW}%"></b></span>
+        <span class="n">${fmtNum(r.count)}</span>
+        <span class="n ${r.errors ? "e" : "muted"}" title="lỗi 4xx/5xx hoặc task failed">${r.errors ? `${fmtNum(r.errors)} lỗi` : "–"}</span>
+      </div>`;
+    }).join("") || `<div class="empty">Chưa có request</div>`;
+  }
+
+  function accountsSummary() {
+    const t = now();
+    const order = {quota: 0, invalid: 1, cooling: 2, active: 3, disabled: 4};
+    const list = [...state.accounts].sort((a, b) => order[accState(a, t).key] - order[accState(b, t).key]);
+    return list.slice(0, 7).map((a) => {
+      const s = accState(a, t);
+      const cool = s.key === "quota" || s.key === "cooling";
+      return `<div class="li click" data-goto="accounts" tabindex="0">
+        <span class="dot ${s.cls}"></span>
+        <span class="lbl" title="${esc(a.label || a.id)}">${esc(a.label || a.id)}</span>
+        <span class="badge plain ${s.badge}">${esc(s.label)}${cool ? ` · <span class="mono" data-until="${esc(a.cooldown_until)}">${esc(countdown(a.cooldown_until - t))}</span>` : ""}</span>
+        <span class="n" title="thành công / thất bại">${fmtNum(a.success_count)}<span class="muted">/</span><span class="${a.fail_count ? "e" : "muted"}" style="${a.fail_count ? "color:var(--err)" : ""}">${fmtNum(a.fail_count)}</span></span>
+      </div>`;
+    }).join("") + (list.length > 7 ? `<div class="li muted" style="font-size:12px">+${list.length - 7} account khác</div>` : "")
+      || `<div class="empty">Chưa có account</div>`;
+  }
+
+  let lastStats = null, resizeTimer;
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if (lastStats && state.page === "overview") $("#chart").innerHTML = chart(lastStats.series, lastStats.bucket_seconds);
+    }, 150);
+  });
+
+  async function loadOverview() {
+    const [stats, st] = await Promise.all([api(`/admin/stats?window=${state.window}`), loadAccounts()]);
+    const pool = st.accounts || {};
+    const activeKeys = state.keys.filter((k) => !k.revoked).length;
+    $("#tiles").innerHTML = [
+      tile("Requests", fmtNum(stats.total), `${stats.window} gần nhất`),
+      tile("Tỉ lệ lỗi", fmtPct(stats.error_rate), `${fmtNum(stats.errors)} lỗi · ${fmtNum(stats.server_errors)} 5xx`, stats.error_rate >= 0.1 ? "bad" : ""),
+      tile("Độ trễ p95", fmtMs(stats.latency_ms.p95), `p50 ${fmtMs(stats.latency_ms.p50)}`),
+      tile("Accounts sẵn sàng", `${fmtNum(pool.available)}/${fmtNum(pool.total)}`, `${fmtNum(pool.inflight)} đang xử lý`, pool.total && !pool.available ? "warn" : ""),
+      tile("API keys", fmtNum(activeKeys), `đang hoạt động · ${fmtNum(state.keys.length - activeKeys)} đã thu hồi`),
+    ].join("");
+    lastStats = stats;
+    $("#chart").innerHTML = chart(stats.series, stats.bucket_seconds);
+    const b = stats.bucket_seconds;
+    $("#bucket-note").textContent = `mỗi cột ${b >= 3600 ? `${b / 3600} giờ` : `${b / 60} phút`}`;
+    $("#ov-keys").innerHTML = meterList(stats.by_key, (r) => keyLabel(r.key_id, r.key_name),
+      {attrs: (r) => r.key_id ? `data-key="${esc(r.key_id)}" tabindex="0"` : ""});
+    $("#ov-models").innerHTML = meterList(stats.by_model, (r) => r.model || "(không có)");
+    $("#ov-status").innerHTML = meterList(stats.by_status, (r) => String(r.status_code));
+    $("#ov-accounts").innerHTML = accountsSummary();
+  }
+
+  function overviewNav(e) {
+    if (e.type === "keydown" && e.key !== "Enter") return;
+    const k = e.target.closest("[data-key]");
+    if (k) return go("requests", {key: k.dataset.key});
+    if (e.target.closest("[data-goto=accounts]")) go("accounts");
+  }
+  for (const id of ["#ov-keys", "#ov-accounts"]) {
+    $(id).addEventListener("click", overviewNav);
+    $(id).addEventListener("keydown", overviewNav);
+  }
+  $("#window").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-w]");
+    if (!b) return;
+    state.window = b.dataset.w;
+    for (const x of $("#window").children) x.setAttribute("aria-pressed", String(x === b));
+    guarded(loadOverview);
+  });
+  $("#ov-refresh").addEventListener("click", () => guarded(loadOverview));
+
+  // ---- keys ----
+  const BUILTIN_NOTE = {legacy: "MUSE2API_API_KEY (key đơn cũ)", admin: "MUSE2API_ADMIN_KEY"};
+  async function fetchKeys() {
+    const res = await api("/admin/keys");
+    // Active keys first; the server already orders by creation time.
+    state.keys = (res.data || []).sort((a, b) => Number(a.revoked) - Number(b.revoked));
+    state.builtin = res.builtin || [];
+    const active = state.keys.filter((k) => !k.revoked).length;
+    $("#nav-keys").textContent = state.keys.length ? active : "";
+    fillFilterOptions();
+  }
+
+  function usageCells(u) {
+    u = u || {};
+    const n = (v, cls = "") => `<td class="num ${v ? cls : "zero"}"`;
+    return `${n(u.total)} data-label="Total">${fmtNum(u.total || 0)}</td>
+      ${n(u.requests_24h)} data-label="24h">${fmtNum(u.requests_24h || 0)}</td>
+      ${n(u.errors_24h, "hot")} data-label="Errors 24h">${fmtNum(u.errors_24h || 0)}</td>
+      <td data-label="Last request" title="${esc(fullTime(u.last_request_at))}">${esc(u.last_request_at ? ago(u.last_request_at) : "chưa có")}</td>`;
+  }
+
+  async function loadKeys() {
+    await fetchKeys();
+    const all = [...state.keys, ...state.builtin].map((k) => k.usage || {});
+    const sum = (f) => all.reduce((s, u) => s + (u[f] || 0), 0);
+    const active = state.keys.filter((k) => !k.revoked).length;
+    const req24 = sum("requests_24h"), err24 = sum("errors_24h");
+    $("#key-tiles").innerHTML = [
+      tile("Keys hoạt động", fmtNum(active), `${fmtNum(state.keys.length - active)} đã thu hồi`),
+      tile("Requests 24h", fmtNum(req24), "mọi key, không tính poll"),
+      tile("Lỗi 24h", fmtNum(err24), req24 ? `${fmtPct(err24 / req24)} số request` : "–", err24 && err24 / req24 >= 0.1 ? "bad" : ""),
+    ].join("");
+    const statusBadgeK = (k) => k.revoked ? `<span class="badge b-err">đã thu hồi</span>` : `<span class="badge b-ok">hoạt động</span>`;
+    const rows = state.keys.map((k) => `<tr class="click" data-id="${esc(k.id)}" tabindex="0" title="Xem requests của ${esc(k.name)}">
+        <td class="cell-name"><div><b>${esc(k.name)}</b>${k.note ? `<div class="sub" title="${esc(k.note)}">${esc(k.note)}</div>` : ""}</div><span class="m-status">${statusBadgeK(k)}</span></td>
+        <td class="mono hide-sm" data-label="Key">${esc(k.prefix)}…</td>
+        <td class="cell-status" data-label="Status">${statusBadgeK(k)}</td>
+        ${usageCells(k.usage)}
+        <td class="hide-sm" data-label="Created" title="${esc(fullTime(k.created_at))}">${esc(ago(k.created_at))}</td>
+        <td class="actions"><div class="row">
+          <button class="btn sm" type="button" data-act="edit">Đổi tên</button>
+          <button class="btn sm" type="button" data-act="${k.revoked ? "unrevoke" : "revoke"}">${k.revoked ? "Khôi phục" : "Thu hồi"}</button>
+          <button class="btn sm danger" type="button" data-act="delete">Xoá</button>
+        </div></td>
+      </tr>`).join("") || `<tr><td colspan="9" class="empty" style="grid-column:1/-1">Chưa có key nào. Bấm <b>Cấp API key</b> để tạo key đầu tiên.</td></tr>`;
+    const builtin = state.builtin.map((b) => `<tr class="click builtin" data-id="${esc(b.id)}" tabindex="0" title="Xem requests của ${esc(b.name)}">
+        <td class="cell-name"><div><b>${esc(b.name)}</b><div class="sub">${esc(BUILTIN_NOTE[b.id] || "")}</div></div><span class="m-status"><span class="badge b-mute">có sẵn</span></span></td>
+        <td class="mono hide-sm muted" data-label="Key">env</td>
+        <td class="cell-status" data-label="Status"><span class="badge b-mute">có sẵn</span></td>
+        ${usageCells(b.usage)}
+        <td class="hide-sm muted" data-label="Created">–</td>
+        <td class="actions muted" style="font-size:12px">chỉ đọc</td>
+      </tr>`).join("");
+    $("#keys-body").innerHTML = rows + (builtin ? `<tr class="sep"><td colspan="9">Định danh có sẵn</td></tr>${builtin}` : "");
+  }
+
+  async function keyForm(title, k = {}, submit = "Lưu") {
+    return modal({
+      title,
+      body: `<label class="f">Tên<input type="text" id="kf-name" maxlength="100" value="${esc(k.name || "")}" placeholder="vd. alice-laptop, n8n-prod" autocomplete="off"></label>
+        <label class="f">Ghi chú <span class="hint">không bắt buộc — ai dùng, dùng cho việc gì</span><input type="text" id="kf-note" maxlength="500" value="${esc(k.note || "")}" autocomplete="off"></label>`,
+      actions: [{label: "Huỷ", value: null},
+        {label: submit, primary: true, cls: "primary",
+         collect: () => ({name: $("#kf-name").value.trim(), note: $("#kf-note").value.trim()}),
+         check: (v) => v.name ? "" : "Cần nhập tên cho key."}],
+    });
+  }
+
+  $("#key-new").addEventListener("click", () => guarded(async () => {
+    const form = await keyForm("Cấp API key mới", {}, "Cấp key");
+    if (!form) return;
+    const res = await api("/admin/keys", {method: "POST", body: form});
+    await loadKeys();
+    await modal({
+      title: `Đã cấp key “${res.key.name}”`,
+      body: `<div class="warnbox"><b>Sao chép key ngay bây giờ.</b> Đây là lần duy nhất key được hiển thị — server chỉ lưu bản băm, không thể xem lại.</div>
+        <div class="secret"><input type="text" id="new-key" readonly value="${esc(res.api_key)}" aria-label="API key mới" spellcheck="false">
+        <button class="btn primary" type="button" id="copy-key">${icon("copy")}Sao chép</button></div>
+        <div class="usage-hint">Authorization: Bearer ${esc(res.api_key.slice(0, 12))}…</div>`,
+      actions: [{label: "Tôi đã lưu key", value: null, primary: true, cls: ""}],
+    });
+  }));
+  // The copy button lives inside the modal body, which is re-rendered per modal.
+  $("#modal-body").addEventListener("click", async (e) => {
+    const btn = e.target.closest("#copy-key");
+    if (!btn) return;
+    const input = $("#new-key");
+    input.select();
+    let ok = false;
+    try { await navigator.clipboard.writeText(input.value); ok = true; }
+    catch { try { ok = document.execCommand("copy"); } catch {} }
+    btn.innerHTML = ok ? `${icon("copy")}Đã sao chép` : "Hãy copy thủ công";
+  });
+
+  function openKeyRequests(id) { go("requests", {key: id}); }
+  $("#keys-body").addEventListener("keydown", (e) => {
+    const tr = e.target.closest("tr[data-id]");
+    if (tr && e.key === "Enter" && e.target === tr) openKeyRequests(tr.dataset.id);
+  });
+  $("#keys-body").addEventListener("click", (e) => {
+    const tr = e.target.closest("tr[data-id]");
+    if (!tr) return;
+    const btn = e.target.closest("button[data-act]");
+    if (!btn) return openKeyRequests(tr.dataset.id);
+    const k = state.keys.find((x) => x.id === tr.dataset.id);
+    if (!k) return;
+    guarded(async () => {
+      const path = `/admin/keys/${encodeURIComponent(k.id)}`;
+      const ident = `<b>${esc(k.name)}</b> (<span class="mono">${esc(k.prefix)}…</span>)`;
+      switch (btn.dataset.act) {
+        case "edit": {
+          const form = await keyForm("Đổi tên key", k);
+          if (!form) return;
+          await api(path, {method: "PATCH", body: form});
+          toast("Đã cập nhật key");
+          break;
+        }
+        case "revoke":
+          if (!await confirmBox("Thu hồi key?", `<p>Mọi request dùng ${ident} sẽ nhận 401 cho tới khi key được khôi phục.</p>`, "Thu hồi")) return;
+          await api(path, {method: "PATCH", body: {revoked: true}});
+          toast("Đã thu hồi key");
+          break;
+        case "unrevoke":
+          await api(path, {method: "PATCH", body: {revoked: false}});
+          toast("Đã khôi phục key");
+          break;
+        case "delete":
+          if (!await confirmBox("Xoá key?", `<p>Xoá vĩnh viễn ${ident}? Client đang dùng key sẽ nhận 401. Lịch sử request vẫn được giữ trong log.</p>`, "Xoá key")) return;
+          await api(path, {method: "DELETE"});
+          toast("Đã xoá key");
+          break;
+      }
+      await loadKeys();
+    });
+  });
+
+  // ---- requests ----
+  function fillFilterOptions() {
+    const keySel = $("#f-key"), accSel = $("#f-account");
+    const keyVal = keySel.value || state.pendingKey || "", accVal = accSel.value || state.pendingAccount || "";
+    keySel.innerHTML = `<option value="">Mọi key</option><option value="legacy">legacy</option><option value="admin">admin</option>`
+      + state.keys.map((k) => `<option value="${esc(k.id)}">${esc(k.name)}${k.revoked ? " (đã thu hồi)" : ""}</option>`).join("");
+    accSel.innerHTML = `<option value="">Mọi account</option>`
+      + state.accounts.map((a) => `<option value="${esc(a.id)}">${esc(a.label || a.id)}</option>`).join("");
+    for (const [sel, val] of [[keySel, keyVal], [accSel, accVal]]) {
+      sel.value = val;
+      if (val && sel.value !== val) {
+        // Deleted key or account that is still in the log: keep it selectable.
+        const o = document.createElement("option");
+        o.value = val; o.textContent = val;
+        sel.appendChild(o);
+        sel.value = val;
+      }
+    }
+    state.pendingKey = state.pendingAccount = "";
+    renderChips();
+  }
+  function renderChips() {
+    const chips = [];
+    const k = $("#f-key").value, a = $("#f-account").value;
+    if (k) chips.push(`<span class="chip">Key: ${esc(keyLabel(k, k))}<button type="button" data-clear="f-key" aria-label="Bỏ lọc key">${icon("x")}</button></span>`);
+    if (a) chips.push(`<span class="chip">Account: ${esc(accountLabel(a))}<button type="button" data-clear="f-account" aria-label="Bỏ lọc account">${icon("x")}</button></span>`);
+    $("#f-chips").innerHTML = chips.join("");
+  }
+  $("#f-chips").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-clear]");
+    if (!b) return;
+    $(`#${b.dataset.clear}`).value = "";
+    state.offset = 0;
+    renderChips();
+    syncHash();
+    guarded(loadRequests);
+  });
+
+  let lastRows = [];
+  async function loadRequests() {
+    const p = new URLSearchParams({limit: state.limit, offset: state.offset});
+    if ($("#f-key").value) p.set("key_id", $("#f-key").value);
+    if ($("#f-account").value) p.set("account_id", $("#f-account").value);
+    if ($("#f-status").value) p.set("status", $("#f-status").value);
+    if ($("#f-path").value.trim()) p.set("path", $("#f-path").value.trim());
+    if ($("#f-polls").checked) p.set("hide_polls", "true");
+    const res = await api(`/admin/requests?${p}`);
+    lastRows = res.data;
+    $("#req-body").innerHTML = res.data.map((r, i) => `<tr class="click" data-i="${i}" tabindex="0">
+        <td class="mono" title="${esc(fullTime(r.ts))}">${esc(clock(r.ts))}</td>
+        <td class="mono">${esc(r.method)}</td>
+        <td class="mono trunc" title="${esc(r.path)}">${esc(r.path)}${r.stream ? ` <span class="badge plain b-mute">stream</span>` : ""}${r.poll ? ` <span class="badge plain b-mute">poll</span>` : ""}</td>
+        <td class="hide-sm">${esc(r.model || "")}</td>
+        <td>${esc(r.key_name || "")}</td>
+        <td class="hide-sm trunc">${esc(accountLabel(r.account_id))}</td>
+        <td class="num" title="${esc(r.error || "")}">${statusBadge(r.status_code)}${taskBadge(r)}</td>
+        <td class="num">${esc(fmtMs(r.latency_ms))}</td>
+        <td class="hide-sm mono">${esc(r.client_ip || "")}</td>
+      </tr>`).join("") || `<tr><td colspan="9" class="empty">Không có request nào khớp bộ lọc.</td></tr>`;
+    const end = state.offset + res.data.length;
+    $("#req-range").textContent = res.total ? `${state.offset + 1}–${end} / ${fmtNum(res.total)}` : "";
+    $("#req-prev").disabled = state.offset === 0;
+    $("#req-next").disabled = end >= res.total;
+  }
+
+  function showRequest(r) {
+    const fields = [
+      ["ID", r.id], ["Time", fullTime(r.ts)], ["Method", r.method], ["Path", r.path],
+      ["Status", r.status_code], ["Latency", fmtMs(r.latency_ms)], ["Stream", r.stream ? "yes" : "no"],
+      ["Poll", r.poll ? "yes" : "no"], ["Model", r.model], ["Key", r.key_name ? `${r.key_name} (${r.key_id})` : ""],
+      ["Account", r.account_id ? `${accountLabel(r.account_id)} (${r.account_id})` : ""],
+      ["Task", r.task_id ? `${r.task_id} · ${r.task_status || "running"}${r.task_ms != null ? ` · ${fmtMs(r.task_ms)}` : ""}` : ""], ["Client IP", r.client_ip], ["User agent", r.user_agent],
+    ];
+    modal({
+      title: `${r.method} ${r.path}`, wide: true,
+      body: `${r.error ? `<div class="errbox">${esc(r.error)}</div>` : ""}
+        <dl class="kv">${fields.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v == null || v === "" ? "–" : v)}</dd>`).join("")}</dl>`,
+      actions: [{label: "Đóng", value: null, primary: true, cls: "primary"}],
+    });
+  }
+  $("#req-body").addEventListener("click", (e) => {
+    const tr = e.target.closest("tr[data-i]");
+    if (tr) showRequest(lastRows[Number(tr.dataset.i)]);
+  });
+  $("#req-body").addEventListener("keydown", (e) => {
+    const tr = e.target.closest("tr[data-i]");
+    if (tr && e.key === "Enter") showRequest(lastRows[Number(tr.dataset.i)]);
+  });
+  for (const id of ["#f-key", "#f-account", "#f-status", "#f-polls"]) {
+    $(id).addEventListener("change", () => { state.offset = 0; renderChips(); syncHash(); guarded(loadRequests); });
+  }
+  let pathTimer;
+  $("#f-path").addEventListener("input", () => {
+    clearTimeout(pathTimer);
+    pathTimer = setTimeout(() => { state.offset = 0; guarded(loadRequests); }, 300);
+  });
+  $("#f-live").addEventListener("change", () => { $("#live-dot").classList.toggle("on", $("#f-live").checked); });
+  $("#req-prev").addEventListener("click", () => { state.offset = Math.max(0, state.offset - state.limit); guarded(loadRequests); });
+  $("#req-next").addEventListener("click", () => { state.offset += state.limit; guarded(loadRequests); });
+
+  // ---- routing: #page or #requests?key=..&account=.. ----
+  const loaders = {overview: loadOverview, accounts: loadAccountsPage, keys: loadKeys, requests: loadRequests};
+  function parseHash() {
+    const [page, query] = location.hash.replace(/^#/, "").split("?");
+    return {page: loaders[page] ? page : "", params: new URLSearchParams(query || "")};
+  }
+  function go(page, params) {
+    const q = params ? new URLSearchParams(Object.entries(params).filter(([, v]) => v)).toString() : "";
+    const hash = `#${page}${q ? `?${q}` : ""}`;
+    if (location.hash === hash) route(); else location.hash = hash;
+  }
+  function syncHash() {
+    if (state.page !== "requests") return;
+    const p = new URLSearchParams();
+    if ($("#f-key").value) p.set("key", $("#f-key").value);
+    if ($("#f-account").value) p.set("account", $("#f-account").value);
+    const hash = `#requests${p.toString() ? `?${p}` : ""}`;
+    if (location.hash !== hash) history.replaceState(null, "", hash);
+  }
+  function route() {
+    let {page, params} = parseHash();
+    if (!page) page = store.get("muse2api.page") || "overview";
+    if (!loaders[page]) page = "overview";
+    state.page = page;
+    if (page === "requests" && (params.has("key") || params.has("account"))) {
+      state.pendingKey = params.get("key") || "";
+      state.pendingAccount = params.get("account") || "";
+      $("#f-key").value = ""; $("#f-account").value = "";
+      state.offset = 0;
+      fillFilterOptions();
+    }
+    for (const a of $$(".side nav a")) {
+      if (a.dataset.page === page) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+    }
+    for (const p of Object.keys(loaders)) $(`#page-${p}`).hidden = p !== page;
+    $("#top-title").textContent = PAGES[page];
+    document.title = `${PAGES[page]} · muse2api dashboard`;
+    store.set("muse2api.page", page);
+    setDrawer(false);
+    guarded(loaders[page]);
+  }
+  window.addEventListener("hashchange", route);
+
+  // ---- drawer (narrow screens) ----
+  function setDrawer(open) {
+    $("#app").classList.toggle("drawer", open);
+    $("#burger").setAttribute("aria-expanded", String(open));
+    if (open) $(".side nav a[aria-current]")?.focus();
+  }
+  $("#burger").addEventListener("click", () => setDrawer(!$("#app").classList.contains("drawer")));
+  $("#scrim").addEventListener("click", () => setDrawer(false));
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !state.modalOpen && $("#app").classList.contains("drawer")) { setDrawer(false); $("#burger").focus(); }
+  });
+  $("#signout").addEventListener("click", () => { setKey(""); stop(); showLogin(); });
+
+  // ---- live countdowns, every second ----
+  let refetchAt = 0;
+  setInterval(() => {
+    if (document.hidden || $("#app").hidden) return;
+    const t = now();
+    let expired = false;
+    for (const el of $$("[data-until]")) {
+      const left = Number(el.dataset.until) - t;
+      el.textContent = countdown(left);
+      if (left <= 0) expired = true;
+    }
+    for (const el of $$("[data-ago]")) {
+      const ts = Number(el.dataset.ago);
+      el.textContent = ago(ts);
+    }
+    // A cooldown just ran out: refresh so the account shows as active again.
+    if (expired && t > refetchAt && !state.modalOpen) {
+      refetchAt = t + 10;
+      if (state.page === "accounts") guarded(loadAccountsPage);
+      else if (state.page === "overview") guarded(loadOverview);
+    }
+  }, 1000);
+
+  // ---- refresh loop ----
+  function tick(n) {
+    if (document.hidden || state.modalOpen) return;
+    const p = state.page;
+    if (p === "requests" && $("#f-live").checked) guarded(loadRequests);
+    else if (p === "accounts" && n % 2 === 0) guarded(loadAccountsPage);
+    else if ((p === "overview" || p === "keys") && n % 6 === 0) guarded(loaders[p]);
+    // Keep the sidebar health indicator fresh on pages that do not fetch status.
+    if ((p === "requests" || p === "keys") && n % 3 === 0) guarded(loadAccounts);
+  }
+  function stop() { clearInterval(state.timer); state.timer = null; }
+  async function start() {
+    stop();
+    $("#login").hidden = true;
+    $("#app").hidden = false;
+    // Labels for filters and names come from these two lists.
+    await guarded(async () => { await loadAccounts(); await fetchKeys(); });
+    if (!getKey()) return;
+    route();
+    let n = 0;
+    state.timer = setInterval(() => tick(++n), 5000);
+  }
+
+  if (getKey()) start(); else showLogin();
+})();
+</script>
+</body>
+</html>

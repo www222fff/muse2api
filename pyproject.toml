@@ -17,9 +17,16 @@ dependencies = [
     "pydantic-settings>=2.5",
     "httpx[socks]>=0.27",
     "websockets>=13.0",
+    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]
+# background="transparent" for /v1/images/generations (BiRefNet + edge colour estimation)
+matting = [
+    "rembg[cpu]>=2.0.60",
+    "pymatting>=1.1",
+    "pillow>=10",
+]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",

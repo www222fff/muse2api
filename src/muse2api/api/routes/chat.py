@@ -7,7 +7,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
 from ...core.media import load_image_ref
@@ -33,8 +33,11 @@ def _sse(payload: dict | str) -> bytes:
 
 
 @router.post("/v1/chat/completions")
-async def chat_completions(body: ChatCompletionRequest, svc: Services = Depends(get_services)):
+async def chat_completions(body: ChatCompletionRequest, request: Request,
+                           svc: Services = Depends(get_services)):
+    request.state.model = body.model  # logged even if it does not resolve
     spec = resolve_model(body.model, "chat")
+    request.state.model = body.model or spec.id
     flat = flatten_messages([m.model_dump() for m in body.messages])
     if not flat.text and not flat.images:
         raise InvalidRequest("messages contain no text or images")

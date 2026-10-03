@@ -30,7 +30,9 @@ def _task_view(task: Task) -> dict:
 @router.post("/v1/videos")
 async def create_video(body: VideoCreateRequest, request: Request,
                        svc: Services = Depends(get_services)) -> dict:
+    request.state.model = body.model  # logged even if it does not resolve
     spec = resolve_model(body.model, "video")
+    request.state.model = body.model or spec.id
     frame_ref = body.image or body.input_reference
     first_frame = InputImage(*(await load_image_ref(frame_ref))) if frame_ref else None
     base = public_base(request)
@@ -47,12 +49,15 @@ async def create_video(body: VideoCreateRequest, request: Request,
     request_meta = {"model": spec.id, "prompt": body.prompt, "size": body.size,
                     "duration": body.duration or body.seconds, "has_first_frame": bool(first_frame)}
     task = svc.tasks.submit("video", request_meta, runner)
+    request.state.task_id = task.id
     return _task_view(task)
 
 
 @router.get("/v1/videos/{task_id}")
-async def get_video(task_id: str, svc: Services = Depends(get_services)) -> dict:
+async def get_video(task_id: str, request: Request,
+                    svc: Services = Depends(get_services)) -> dict:
     task = svc.tasks.get(task_id)
     if task is None or task.kind != "video":
         raise NotFound(f"video task '{task_id}' not found")
+    request.state.model = task.request.get("model")
     return _task_view(task)

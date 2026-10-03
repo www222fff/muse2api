@@ -53,7 +53,8 @@ The project focuses on **clean engineering and easy collaboration**:
 | Browser driver (Chromium + CDP) | 🧪 Needs live testing | Full chat, image and video flows are written |
 | Session renewal / keepalive | 🧪 Needs live testing | Plain HTTP, disabled by default |
 | Direct HTTP protocol driver | 🚧 Reserved | Returns 501 |
-| `/v1/responses`, `/v1/images/edits` | 🚧 Reserved | Returns 501 |
+| `/v1/images/edits` (reference images) | ✅ Implemented | Images are references for a new image; `mask` is rejected |
+| `/v1/responses` | 🚧 Reserved | Returns 501 |
 | Web console, cookie import extension, quota lookup | 🚧 Reserved | |
 
 ## Architecture
@@ -181,6 +182,41 @@ curl http://localhost:18610/v1/images/generations \
   -d '{"prompt":"A cyberpunk street on a rainy night","size":"16:9","response_format":"url"}'
 ```
 
+**Transparent background**
+
+muse.ai only returns flat RGB images, so `"background":"transparent"` cuts the subject out locally (BiRefNet + edge colour estimation) and returns an RGBA PNG. Requires `pip install -e '.[matting]'`; the model (~930MB) is downloaded to `~/.u2net` on first use. Expect ~30s extra per image on CPU.
+
+```bash
+curl http://localhost:18610/v1/images/generations \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"prompt":"A red fox sitting","background":"transparent"}'
+```
+
+**Image from reference images**
+
+`"image"` takes one reference image or a list of up to 4 (data URL, http(s) URL or bare base64). They are attached to the muse.ai message like a chat upload, and the prompt says how to use them, e.g. put a product on a model, or "the same fox, now wearing a red scarf" to keep the subject and scene. `/v1/images/edits` does the same with OpenAI-style multipart uploads, so `client.images.edit()` works; `mask` (inpainting a region) is not supported.
+
+```bash
+curl http://localhost:18610/v1/images/generations \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"prompt":"A model wearing exactly this hoodie, studio photo","image":"data:image/jpeg;base64,..."}'
+
+curl http://localhost:18610/v1/images/edits \
+  -H "Authorization: Bearer $KEY" \
+  -F "image[]=@fox.png" -F "prompt=The same fox, now wearing a red scarf"
+```
+
+**Image as an async task**
+
+A sync image call (page load plus generation) can take longer than a reverse proxy allows; Cloudflare cuts it after about 100 s with HTTP 524. Add `"async": true` to get a task back, then poll it. Results are always stored as media URLs.
+
+```bash
+curl http://localhost:18610/v1/images/generations \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"prompt":"A red fox sitting","async":true}'          # -> {"id":"task_xxx","object":"image.task",...}
+curl http://localhost:18610/v1/images/generations/task_xxx -H "Authorization: Bearer $KEY"
+```
+
 **Text to video (async task)**
 
 ```bash
@@ -208,13 +244,23 @@ curl http://localhost:18610/admin/accounts \
 | GET | `/healthz` · `/readyz` | Liveness · readiness (driver state and available accounts) |
 | GET | `/v1/models` | Model list, including aliases such as `gpt-4o` and `dall-e-3` |
 | POST | `/v1/chat/completions` | Chat, streaming and non-streaming |
-| POST | `/v1/images/generations` | Text to image, returns `url` or `b64_json` |
+| POST | `/v1/images/generations` · GET `/v1/images/generations/{id}` | Text to image (optional `image` references), returns `url` or `b64_json`; `"async": true` returns a task to poll |
+| POST | `/v1/images/edits` | Multipart `image`/`image[]` files + `prompt`, OpenAI-compatible |
 | POST | `/v1/videos` · GET `/v1/videos/{id}` | Create a video task · query a task |
 | GET | `/v1/media/{name}` | Download generated media |
 | GET/POST/PATCH/DELETE | `/admin/accounts[/{id}]` | Account CRUD |
 | POST | `/admin/accounts/{id}/renew` · `/reset` | Renew session · reset account state |
 | GET | `/admin/status` · `/admin/tasks` | Service status · task list |
-| POST | `/v1/responses` · `/v1/images/edits` | Reserved, currently return 501 |
+| GET/POST/PATCH/DELETE | `/admin/keys[/{id}]` | Client API keys (create returns the key once; PATCH renames / revokes) |
+| GET | `/admin/requests` · `/admin/stats?window=1h\|24h\|7d` | Request log (filters: `key_id`, `account_id`, `status=2xx\|4xx\|5xx`, `path`, `since`, `hide_polls`) · aggregates |
+| GET | `/dashboard` | Web dashboard (asks for the admin key in the browser) |
+| POST | `/v1/responses` | Reserved, currently returns 501 |
+
+### Dashboard, API keys and request log
+
+Open `http://localhost:18610/dashboard` and enter the admin key; it is kept in the browser's local storage and sent as a Bearer token to `/admin/*`. The page shows request volume, error rate and latency, the account pool (enable/disable, renew, reset), a live request log, and API key management.
+
+Besides the admin key and `MUSE2API_API_KEY` (still accepted, logged as `legacy`), `/v1/*` accepts any non-revoked key created on the dashboard or with `POST /admin/keys {"name": "..."}`. Keys look like `m2a-...` and are shown once; `data/keys.json` stores only their SHA-256 hash and an 8-character prefix. Every `/v1/*` request (except `/v1/media/*` downloads) is recorded in `data/requests.db` (SQLite) with its key, model, account, status, latency and client IP (`CF-Connecting-IP` / `X-Forwarded-For` aware). Task status polls are flagged so the dashboard and stats can leave them out.
 
 ## Configuration
 
@@ -226,11 +272,14 @@ All settings come from environment variables (prefix `MUSE2API_`) or a `.env` fi
 | `MUSE2API_HOST` · `MUSE2API_PORT` | `127.0.0.1` · `18610` | Listen address and port |
 | `MUSE2API_API_KEY` | auto-generated | Key for `/v1/*` endpoints |
 | `MUSE2API_ADMIN_KEY` | same as API key | Key for `/admin/*` endpoints |
+| `MUSE2API_REQUEST_LOG_RETENTION_DAYS` | `14` | Days of request history kept in `data/requests.db` |
 | `MUSE2API_PUBLIC_BASE` | empty | Public base URL used in media links; derived from the request when empty |
 | `MUSE2API_POOL_STRATEGY` | `lru` | Account scheduling: `lru` / `round_robin` / `affinity` |
 | `MUSE2API_MAX_FAILOVER` | `2` | Maximum number of retries on another account |
+| `MUSE2API_ACCOUNT_MAX_CONCURRENCY` | `1` | Parallel requests per account (browser driver: one tab each); 4 works well |
 | `MUSE2API_CHROMIUM_PATH` | auto-detected | Path to the browser executable |
 | `MUSE2API_KEEPALIVE_ENABLED` | `false` | Periodically renew sessions in the background |
+| `MUSE2API_MATTING_MODEL` | `birefnet-general` | Model for `background: "transparent"` (`birefnet-general-lite` is faster) |
 
 ## Roadmap
 
@@ -238,8 +287,8 @@ All reserved modules and outstanding work are tracked in **[TODO.md](TODO.md)**,
 
 - **Verification and live testing (do first)**: get the tests passing, test the browser driver against real accounts, and verify image/video generation and session renewal.
 - **Drivers**: direct HTTP protocol driver, conversation thread reuse, quota lookup.
-- **Protocol**: `/v1/responses`, `/v1/images/edits`, emulated tool calling, streaming heartbeats.
-- **Accounts, admin and operations**: more cookie import formats, browser extension, web console, storage backends, media cleanup, multiple keys with rate limits, metrics.
+- **Protocol**: `/v1/responses`, mask-based inpainting, emulated tool calling, streaming heartbeats.
+- **Accounts, admin and operations**: more cookie import formats, browser extension, storage backends, media cleanup, per-key rate limits, Prometheus metrics.
 
 Each task lists its location, approach and definition of done. Places marked `TODO(contributors)` in the code are the reserved extension points.
 

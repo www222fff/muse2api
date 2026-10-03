@@ -18,7 +18,7 @@ import base64
 import contextlib
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
@@ -73,6 +73,16 @@ class _Tab:
     turns: list[tuple[str, str]] = field(default_factory=list)
     image_count: int = 0
     thread_url: str = ""
+    quota_note: str = ""
+    """Last ignored quota-hint snippet, so a page polled every 0.6s logs it once."""
+    busy: bool = False
+    stale: bool = False
+    """Cookies were renewed; close this tab once it is idle."""
+    closed: bool = False
+
+    @property
+    def has_state(self) -> bool:
+        return bool(self.turns or self.thread_url)
 
 
 class BrowserDriver(MuseDriver):
@@ -85,8 +95,13 @@ class BrowserDriver(MuseDriver):
         self.settings = settings
         self._chromium: ChromiumProcess | None = None
         self._browser: CDPSession | None = None
-        self._tabs: dict[str, _Tab] = {}
-        self._tab_lock = asyncio.Lock()
+        # One browser context (cookie jar) per account, holding up to
+        # account_max_concurrency tabs; each request checks one tab out.
+        self._contexts: dict[str, str] = {}
+        self._tabs: dict[str, list[_Tab]] = {}
+        self._opening: dict[str, int] = {}
+        self._tab_cond = asyncio.Condition()
+        self._ctx_lock = asyncio.Lock()
 
     # ------------------------------------------------------------ lifecycle
     async def startup(self) -> None:
@@ -100,8 +115,9 @@ class BrowserDriver(MuseDriver):
         log.info("browser driver ready")
 
     async def shutdown(self) -> None:
-        for tab in list(self._tabs.values()):
-            await self._close_tab(tab)
+        for tabs in list(self._tabs.values()):
+            for tab in list(tabs):
+                await self._close_tab(tab)
         if self._browser:
             await self._browser.close()
         if self._chromium:
@@ -109,28 +125,87 @@ class BrowserDriver(MuseDriver):
 
     async def health(self) -> dict[str, Any]:
         ok = self._browser is not None and not self._browser.closed
-        return {"driver": self.name, "ok": ok, "tabs": len(self._tabs)}
+        tabs = [t for ts in self._tabs.values() for t in ts]
+        return {"driver": self.name, "ok": ok, "tabs": len(tabs),
+                "busy_tabs": sum(t.busy for t in tabs)}
 
     # ------------------------------------------------------------ tabs
-    async def _tab(self, account: Account) -> _Tab:
-        async with self._tab_lock:
-            tab = self._tabs.get(account.id)
-            if tab and not tab.session.closed:
-                return tab
-            if tab:
-                await self._close_tab(tab)
-            tab = await self._open_tab(account)
-            self._tabs[account.id] = tab
+    async def _checkout(self, account: Account,
+                        prefer: Callable[[_Tab], bool] | None = None) -> _Tab:
+        """Reserve an idle tab of ``account``, opening a new one while under the
+        per-account limit. An idle tab matching ``prefer`` wins; without one, a new
+        tab beats reusing (and so wiping) a tab that holds another conversation.
+        Pair every call with ``_checkin``."""
+        limit = max(1, self.settings.account_max_concurrency)
+        dead: list[_Tab] = []
+        async with self._tab_cond:
+            while True:
+                tabs = self._tabs.setdefault(account.id, [])
+                for t in [t for t in tabs
+                          if t.closed or (not t.busy and (t.stale or t.session.closed))]:
+                    tabs.remove(t)
+                    dead.append(t)
+                idle = [t for t in tabs if not t.busy]
+                can_open = len(tabs) + self._opening.get(account.id, 0) < limit
+                match = next((t for t in idle if prefer is None or prefer(t)), None)
+                if match or (idle and not can_open):
+                    tab = match or next((t for t in idle if not t.has_state), idle[0])
+                    tab.busy = True
+                    break
+                if can_open:
+                    self._opening[account.id] = self._opening.get(account.id, 0) + 1
+                    tab = None
+                    break
+                # The pool caps requests per account, so this only waits out a tab
+                # that is still being closed.
+                await self._tab_cond.wait()
+        for t in dead:
+            await self._close_tab(t)
+        if tab:
             return tab
+        try:
+            tab = await self._open_tab(account)
+        finally:
+            async with self._tab_cond:
+                self._opening[account.id] -= 1
+                if tab:
+                    tab.busy = True
+                    self._tabs.setdefault(account.id, []).append(tab)
+                self._tab_cond.notify_all()
+        log.info("opened tab %d for account %s", len(self._tabs[account.id]), account.id)
+        return tab
+
+    async def _checkin(self, tab: _Tab) -> None:
+        # Free the tab before taking the lock: a request cancelled while waiting for
+        # the lock (client gone) must not leave its tab marked busy for good.
+        tab.busy = False
+        await asyncio.shield(self._notify_tabs())
+        if tab.stale:
+            await self._close_tab(tab)
+
+    async def _notify_tabs(self) -> None:
+        async with self._tab_cond:
+            self._tab_cond.notify_all()
+
+    async def _context(self, account: Account) -> str:
+        async with self._ctx_lock:
+            if ctx := self._contexts.get(account.id):
+                return ctx
+            assert self._browser
+            res = await self._browser.send("Target.createBrowserContext", {"disposeOnDetach": False})
+            self._contexts[account.id] = res["browserContextId"]
+            return res["browserContextId"]
 
     async def _open_tab(self, account: Account) -> _Tab:
         if missing := muse.missing_session_cookies(account.cookies):
             raise UpstreamAuthError(f"account is missing session cookies: {', '.join(missing)}")
         assert self._browser and self._chromium
-        ctx = await self._browser.send("Target.createBrowserContext", {"disposeOnDetach": False})
-        context_id = ctx["browserContextId"]
+        context_id = await self._context(account)
+        # A window per tab: Chromium throttles background tabs of a shared window,
+        # which made parallel requests on one account run one after another.
         target = await self._browser.send(
-            "Target.createTarget", {"url": "about:blank", "browserContextId": context_id}
+            "Target.createTarget",
+            {"url": "about:blank", "browserContextId": context_id, "newWindow": True},
         )
         target_id = target["targetId"]
         session = await CDPSession.connect(
@@ -138,19 +213,36 @@ class BrowserDriver(MuseDriver):
         )
         for domain in ("Page", "Runtime", "Network"):
             await session.send(f"{domain}.enable")
+        await session.send("Emulation.setFocusEmulationEnabled", {"enabled": True})
+        await session.send("Page.setWebLifecycleState", {"state": "active"})
         await self._set_cookies(session, account)
         return _Tab(account.id, context_id, target_id, session)
 
     async def _close_tab(self, tab: _Tab) -> None:
-        self._tabs.pop(tab.account_id, None)
+        """Idempotent; marks the tab closed first so a cancelled close never leaves it
+        counted as open or busy."""
+        if tab.closed:
+            return
+        tab.closed, tab.busy = True, False
+        await asyncio.shield(self._dispose_tab(tab))
+
+    async def _dispose_tab(self, tab: _Tab) -> None:
+        async with self._tab_cond:
+            tabs = self._tabs.get(tab.account_id, [])
+            if tab in tabs:
+                tabs.remove(tab)
+            last = not tabs and not self._opening.get(tab.account_id)
+            context_id = self._contexts.pop(tab.account_id, None) if last else None
+            self._tab_cond.notify_all()
         await tab.session.close()
         if self._browser and not self._browser.closed:
             with contextlib.suppress(Exception):
                 await self._browser.send("Target.closeTarget", {"targetId": tab.target_id})
-            with contextlib.suppress(Exception):
-                await self._browser.send(
-                    "Target.disposeBrowserContext", {"browserContextId": tab.context_id}
-                )
+            if context_id:
+                with contextlib.suppress(Exception):
+                    await self._browser.send(
+                        "Target.disposeBrowserContext", {"browserContextId": context_id}
+                    )
 
     @staticmethod
     async def _set_cookies(session: CDPSession, account: Account) -> None:
@@ -244,8 +336,9 @@ class BrowserDriver(MuseDriver):
         state: dict = {}
         while time.monotonic() < deadline:
             await asyncio.sleep(0.25)
-            with contextlib.suppress(CDPError):
-                state = await tab.session.evaluate(dom.PAGE_STATE) or {}
+            # A busy page can leave Runtime.evaluate unanswered while it loads; poll again.
+            with contextlib.suppress(CDPError, TimeoutError):
+                state = await tab.session.evaluate(dom.PAGE_STATE, timeout=5.0) or {}
                 if state.get("ready"):
                     return
         head = (state.get("head") or "").lower()
@@ -287,21 +380,35 @@ class BrowserDriver(MuseDriver):
     async def _state(self, tab: _Tab) -> dict:
         state = await tab.session.evaluate(dom.CHAT_STATE) or {}
         tail = state.get("tail", "")
-        if any(h in tail.lower() for h in dom.QUOTA_HINTS):
-            raise UpstreamQuotaError("muse.ai reports the account is out of quota")
+        low = tail.lower()
+        if hit := next((h for h in dom.QUOTA_HINTS if h in low), None):
+            i = low.find(hit)
+            snippet = " ".join(tail[max(0, i - 120):i + 120].split())
+            # The page tail also holds the prompt and the thread-history sidebar, and
+            # matching it cooled down accounts whose images muse.ai went on to deliver.
+            # Only a finished agent reply that says so counts; anything else is logged.
+            reply = state.get("lastText", "")
+            if not state.get("generating") and hit in reply.lower():
+                log.warning("quota hint %r in reply on %s: %s", hit,
+                            tab.thread_url or "new thread", snippet)
+                raise UpstreamQuotaError(f"muse.ai reports the account is out of quota: …{snippet}…")
+            if snippet != tab.quota_note:
+                tab.quota_note = snippet
+                log.info("ignoring quota hint %r outside the reply on %s: %s", hit,
+                         tab.thread_url or "new thread", snippet)
         return state
 
-    async def _prepare(self, account: Account, prompt: str, images: list[InputImage]):
-        tab = await self._tab(account)
-        try:
-            await self._new_thread(tab)
-            base = await self._state(tab)
-            await self._attach(tab, images)
-            await self._send(tab, prompt)
-        except CDPError as exc:
-            await self._close_tab(tab)
-            raise UpstreamError(f"browser error: {exc}") from exc
-        return tab, base
+    async def _prepare(self, tab: _Tab, prompt: str, images: list[InputImage]) -> dict:
+        await self._new_thread(tab)
+        base = await self._state(tab)
+        await self._attach(tab, images)
+        await self._send(tab, prompt)
+        return base
+
+    async def _deny_approvals(self, tab: _Tab) -> None:
+        denied = await tab.session.evaluate(dom.DENY_APPROVALS) or []
+        for what in denied:
+            log.info("denied muse.ai %s", what.lower())
 
     # ------------------------------------------------------------ chat
     async def _live_continuation(self, tab: _Tab) -> bool:
@@ -338,10 +445,14 @@ class BrowserDriver(MuseDriver):
 
     async def _begin_chat(self, account: Account, req: ChatRequest):
         """Send ``req`` on the saved conversation when it continues that page."""
-        tab = await self._tab(account)
+        hint = req.conversation_hint or ""
+        tab = await self._checkout(account, prefer=lambda t: t.has_state and (t.hint or "") == hint)
         prompt, images = req.prompt, req.images
         try:
-            self._load_hot(tab, account)
+            # The saved conversation (restored after a restart) may only go into a
+            # tab while no other tab of the account already holds a conversation.
+            if not any(t.has_state for t in self._tabs.get(account.id, []) if t is not tab):
+                self._load_hot(tab, account)
             same_owner = (tab.hint or "") == (req.conversation_hint or "")
             follow = followup_text(tab.turns, req.turns) if tab.turns and same_owner else None
             if follow and len(req.images) >= tab.image_count and (
@@ -356,7 +467,9 @@ class BrowserDriver(MuseDriver):
                 images = req.images[tab.image_count:]
             else:
                 log.info("opening a new thread")
-                account.meta.pop("hot_page", None)
+                saved = account.meta.get("hot_page")
+                if isinstance(saved, dict) and (saved.get("hint") or "") == hint:
+                    account.meta.pop("hot_page", None)
                 await self._new_thread(tab)
             base = await self._state(tab)
             await self._attach(tab, images)
@@ -364,9 +477,11 @@ class BrowserDriver(MuseDriver):
             return tab, base
         except CDPError as exc:
             await self._close_tab(tab)
+            await self._checkin(tab)
             raise UpstreamError(f"browser error: {exc}") from exc
         except BaseException:
             self._forget(tab)
+            await self._checkin(tab)
             raise
 
     async def chat_stream(self, account: Account, req: ChatRequest) -> AsyncIterator[str]:
@@ -386,6 +501,9 @@ class BrowserDriver(MuseDriver):
                     raise UpstreamTimeout("no first token from assistant")
                 await asyncio.sleep(POLL_INTERVAL)
                 st = await self._state(tab)
+                if st.get("approval"):
+                    await self._deny_approvals(tab)
+                    continue
                 text = st.get("lastText", "")
                 is_new = st.get("agentCount", 0) > base_count or (text and text != base_text)
                 if not is_new or not text:
@@ -422,6 +540,7 @@ class BrowserDriver(MuseDriver):
                     log.info("reply finished but the thread url was not ready yet")
             else:
                 self._forget(tab)
+            await self._checkin(tab)
 
     # ------------------------------------------------------------ media
     @staticmethod
@@ -435,32 +554,111 @@ class BrowserDriver(MuseDriver):
         suffix = f" ({', '.join(hints)})" if hints else ""
         return f"{verb}{suffix}: {prompt}"
 
+    # muse.ai posts a completion sentence ("Here's your video…") a few seconds
+    # before the media attachment's blob src is ready, so a reply that is "text
+    # only" right now may still be finalising. Keep waiting this long for the
+    # attachment to appear/load before treating the reply as a refusal.
+    _MEDIA_GRACE = {"video": 90.0, "image": 8.0}
+    # The timeout is soft while muse.ai is visibly still working (stop button
+    # shown or attachment loading): giving up then threw away images that landed
+    # a minute later, and the failover started the whole generation over.
+    _OVERRUN_FACTOR = 2.5
+
     async def _wait_media(self, tab: _Tab, base: dict, kind: str, timeout: float,
                           on_progress, cancel: asyncio.Event | None) -> dict:
         base_atts = len(base.get("attachments", []))
         base_count = base.get("agentCount", 0)
+        grace = self._MEDIA_GRACE.get(kind, 8.0)
         started = time.monotonic()
-        text_stable, last_text = 0, ""
-        while time.monotonic() - started < timeout:
+        text_done_at: float | None = None
+        denied = asked_to_attach = busy = False
+        while True:
+            elapsed = time.monotonic() - started
+            if elapsed >= timeout and not (busy and elapsed < timeout * self._OVERRUN_FACTOR):
+                break
             if cancel and cancel.is_set():
                 raise asyncio.CancelledError
             await asyncio.sleep(0.6)
             st = await self._state(tab)
-            atts = st.get("attachments", [])
-            fresh = [a for a in atts[base_atts:] if a.get("src") and a.get("kind") == kind]
+            if st.get("approval"):
+                await self._deny_approvals(tab)
+                denied, text_done_at = True, None
+                continue
+            new_atts = st.get("attachments", [])[base_atts:]
+            fresh = [a for a in new_atts if a.get("src") and a.get("kind") == kind]
             if fresh:
                 return fresh[-1]
+            busy = bool(st.get("generating")) or any(kind in (a.get("tid") or "") for a in new_atts)
             elapsed = time.monotonic() - started
             if on_progress:
                 on_progress(min(95, int(elapsed / timeout * 100)))
-            # Assistant finished with text only -> it refused or misunderstood.
+            # An attachment node for this kind is on the page but its (blob) src
+            # has not loaded yet -> media is still finalising, keep waiting.
+            if any(kind in (a.get("tid") or "") for a in new_atts):
+                text_done_at = None
+                continue
+            # No attachment yet. The reply may be genuinely text-only (a refusal),
+            # or the attachment may simply lag the completion sentence.
             text = st.get("lastText", "")
             if st.get("agentCount", 0) > base_count and text and not st.get("generating"):
-                text_stable = text_stable + 1 if text == last_text else 0
-                last_text = text
-                if text_stable >= 8:
+                if text_done_at is None:
+                    text_done_at = time.monotonic()
+                elif time.monotonic() - text_done_at >= grace:
+                    if not asked_to_attach:
+                        # The agent often finishes with the file only in its workspace:
+                        # after a denied upload, after post-processing that it shows as
+                        # an image gallery (raw, QC crops and final mixed together), or
+                        # when it recognises a repeat request and points at the earlier
+                        # file. Asking once gets the final file attached in chat.
+                        log.info("%s not attached (%s); asking for it in chat: %.120s", kind,
+                                 "denied approval" if denied else "text-only reply", text)
+                        await self._send(tab, f"Please attach the final {kind} file here in "
+                                              "the chat" + (" instead of uploading it." if denied
+                                                            else ", as a single attachment."))
+                        asked_to_attach, text_done_at = True, None
+                        base_count = st.get("agentCount", 0)
+                        continue
+                    # Last resort: media delivered as a link in the text bubble.
+                    probe = await tab.session.evaluate(dom.LAST_BUBBLE_MEDIA) or {}
+                    url = self._pick_media_url(probe.get("links", []), kind)
+                    if url:
+                        log.info("%s delivered as link in text bubble: %s", kind, url)
+                        return {"src": url, "kind": kind}
+                    log.info("%s: no media after %.0fs grace; links=%s html=%.300s",
+                             kind, grace, probe.get("links", []), probe.get("html", ""))
                     raise UpstreamRefused(f"upstream replied with text only: {text[:200]}")
+            else:
+                text_done_at = None
+        if busy:
+            log.warning("%s still generating after %.0fs; giving up", kind, elapsed)
         raise UpstreamTimeout(f"{kind} generation timed out")
+
+    _VIDEO_EXT = (".mp4", ".webm", ".mov", ".m4v")
+    _IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif")
+    _MEDIA_HOSTS = ("videodelivery.net", "cloudflarestream.com", "cloudflarestorage.com",
+                    "amazonaws.com", "storage.googleapis.com", "blob.core.windows.net",
+                    "musecdn", "cdn.muse", "muse-cdn")
+    _MEDIA_PATHS = ("/media/", "/download", "/dl/", "/video", "/attachment", "/files/")
+
+    @classmethod
+    def _pick_media_url(cls, links: list[str], kind: str) -> str | None:
+        """Best media URL from a reply bubble, or None if nothing looks like one."""
+        exts = cls._VIDEO_EXT if kind == "video" else cls._IMAGE_EXT
+
+        def score(u: str) -> int:
+            low = u.lower()
+            path = low.split("?", 1)[0].split("#", 1)[0]
+            if u.startswith("blob:") or path.endswith(exts):
+                return 3
+            if any(h in low for h in cls._MEDIA_HOSTS):
+                return 2
+            if any(seg in low for seg in cls._MEDIA_PATHS):
+                return 1
+            return 0
+
+        cands = [u for u in links if u and not u.startswith(("mailto:", "javascript:"))]
+        cands.sort(key=score, reverse=True)
+        return cands[0] if cands and score(cands[0]) > 0 else None
 
     async def _download(self, tab: _Tab, att: dict, kind: str) -> MediaResult:
         res = await tab.session.evaluate(dom.fetch_as_base64(att["src"]), await_promise=True,
@@ -473,13 +671,17 @@ class BrowserDriver(MuseDriver):
 
     async def _generate(self, account: Account, prompt: str, images: list[InputImage],
                         kind: str, timeout: float, on_progress, cancel) -> MediaResult:
-        tab, base = await self._prepare(account, prompt, images)
+        # Media always starts a fresh thread, so keep tabs holding a chat for chats.
+        tab = await self._checkout(account, prefer=lambda t: not t.has_state)
         try:
+            base = await self._prepare(tab, prompt, images)
             att = await self._wait_media(tab, base, kind, timeout, on_progress, cancel)
             return await self._download(tab, att, kind)
         except CDPError as exc:
             await self._close_tab(tab)
             raise UpstreamError(f"browser error: {exc}") from exc
+        finally:
+            await self._checkin(tab)
 
     async def generate_image(self, account: Account, req: ImageRequest) -> list[MediaResult]:
         prompt = self._media_prompt(req.prompt, "image", req.size)
@@ -500,7 +702,13 @@ class BrowserDriver(MuseDriver):
     # ------------------------------------------------------------ session
     async def renew_session(self, account: Account) -> SessionInfo:
         info = await muse.renew_session(account.cookies)
-        # Force the tab to pick up rotated cookies on next use.
-        if tab := self._tabs.get(account.id):
+        # Retire the account's tabs so new ones load the rotated cookies; a tab
+        # in the middle of a request is closed when it is checked back in.
+        async with self._tab_cond:
+            tabs = list(self._tabs.get(account.id, []))
+            for tab in tabs:
+                tab.stale = True
+            idle = [t for t in tabs if not t.busy]
+        for tab in idle:
             await self._close_tab(tab)
         return info

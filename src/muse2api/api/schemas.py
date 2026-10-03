@@ -38,6 +38,14 @@ class ImageGenerationRequest(_Lenient):
     n: int = Field(default=1, ge=1, le=4)
     size: str | None = None
     response_format: Literal["url", "b64_json"] = "url"
+    # Same values as OpenAI gpt-image-1. "transparent" cuts the subject out locally
+    # and returns an RGBA PNG; "auto"/"opaque" leave the image as generated.
+    background: Literal["auto", "opaque", "transparent"] | None = None
+    image: str | list[str] | None = Field(
+        default=None, description="Reference image(s) as data URL, http(s) URL or base64 (max 4)")
+    # A sync call can outlive a proxy's timeout (Cloudflare cuts at ~100 s with 524), so
+    # "async": true returns a task to poll at GET /v1/images/generations/{task_id}.
+    async_: bool = Field(default=False, alias="async")
     user: str | None = None
 
 
@@ -63,3 +71,14 @@ class AccountUpdate(BaseModel):
     enabled: bool | None = None
     cookies: dict[str, str] | None = None
     cookie_expires: dict[str, int] | None = None
+
+
+class KeyCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    note: str = Field(default="", max_length=500)
+
+
+class KeyUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    note: str | None = Field(default=None, max_length=500)
+    revoked: bool | None = None

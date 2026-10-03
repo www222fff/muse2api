@@ -38,6 +38,9 @@ class Settings(BaseSettings):
 
     # --- storage ---
     data_dir: Path = Path("data")
+    request_log_retention_days: float = Field(
+        default=14, description="Days of /v1/* request history kept in data/requests.db."
+    )
 
     # --- upstream driver ---
     driver: DriverName = "mock"
@@ -68,6 +71,13 @@ class Settings(BaseSettings):
     account_cooldown: float = 120.0
     max_failover: int = 2
 
+    # --- background removal (images with background="transparent") ---
+    matting_model: str = Field(
+        default="birefnet-general",
+        description="rembg model used to cut out the subject, e.g. birefnet-general "
+        "(best) or birefnet-general-lite (faster).",
+    )
+
     # --- keepalive (session renewal) ---
     keepalive_enabled: bool = False
     keepalive_interval: float = 6 * 3600
@@ -87,6 +97,14 @@ class Settings(BaseSettings):
     @property
     def key_file(self) -> Path:
         return self.data_dir / "api_key"
+
+    @property
+    def keys_file(self) -> Path:
+        return self.data_dir / "keys.json"
+
+    @property
+    def requests_db(self) -> Path:
+        return self.data_dir / "requests.db"
 
     @property
     def profile_dir(self) -> Path:

@@ -13,6 +13,9 @@ INPUT = "textarea"
 AGENT_BUBBLE = 'div[class*="hatch-agent-bubble-bg"]'
 ATTACHMENT = '[data-testid^="hatch-chat-attachment-presentation-"]'
 STOP_BUTTON = 'button[aria-label*="Stop" i]'
+# The agent asks before acting on the user's behalf (e.g. uploading the result to
+# muse.ai/files as a public link). Nobody answers it here, so it would block for minutes.
+APPROVAL_CARD = '[data-testid="hatch-inline-approval-card"]'
 FILE_INPUT = 'input[type="file"]'
 
 LOGIN_HINTS = ("log in", "sign in", "create an account", "use another account")
@@ -61,7 +64,44 @@ CHAT_STATE = f"""(() => {{
   const tail = document.body ? document.body.innerText.slice(-600) : '';
   return {{ agentCount: bubbles.length, lastText: last,
             generating: !!document.querySelector({q(STOP_BUTTON)}),
+            approval: !!document.querySelector({q(APPROVAL_CARD)}),
             attachments: atts, tail }};
+}})()"""
+
+
+# Click "Deny" on every pending approval card; the agent then carries on without
+# the action (and the result stays private instead of becoming a public link).
+DENY_APPROVALS = f"""(() => {{
+  const denied = [];
+  for (const card of document.querySelectorAll({q(APPROVAL_CARD)})) {{
+    const btn = [...card.querySelectorAll('button,[role=button]')]
+      .find(b => /^(deny|decline|reject|don.t allow)$/i.test((b.innerText || '').trim()));
+    if (btn && !btn.disabled) {{
+      btn.click();
+      denied.push(card.getAttribute('aria-label') || 'approval request');
+    }}
+  }}
+  return denied;
+}})()"""
+
+
+# Media links that the assistant delivered as a text bubble / anchor / <video>
+# element rather than as an inline attachment presentation. Scans the last agent
+# bubble for every candidate URL (anchor hrefs, media element srcs incl. blob:,
+# and bare URLs in the text) and returns the bubble HTML for diagnostics.
+LAST_BUBBLE_MEDIA = f"""(() => {{
+  const bubbles = [...document.querySelectorAll({q(AGENT_BUBBLE)})];
+  const b = bubbles.length ? bubbles[bubbles.length - 1] : null;
+  if (!b) return {{ links: [], html: '' }};
+  const urls = [];
+  const push = (u) => {{ if (u && !urls.includes(u)) urls.push(u); }};
+  b.querySelectorAll('video, source').forEach(m => push(m.currentSrc || m.src || ''));
+  b.querySelectorAll('a[href]').forEach(a => push(a.href || ''));
+  b.querySelectorAll('img').forEach(m => push(m.currentSrc || m.src || ''));
+  const text = b.innerText || '';
+  const re = /https?:\\/\\/[^\\s)<>"']+/g;
+  let mm; while ((mm = re.exec(text))) push(mm[0]);
+  return {{ links: urls, html: (b.outerHTML || '').slice(0, 2000) }};
 }})()"""
 
 
