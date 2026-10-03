@@ -435,32 +435,82 @@ class BrowserDriver(MuseDriver):
         suffix = f" ({', '.join(hints)})" if hints else ""
         return f"{verb}{suffix}: {prompt}"
 
+    # muse.ai posts a completion sentence ("Here's your video…") a few seconds
+    # before the media attachment's blob src is ready, so a reply that is "text
+    # only" right now may still be finalising. Keep waiting this long for the
+    # attachment to appear/load before treating the reply as a refusal.
+    _MEDIA_GRACE = {"video": 90.0, "image": 8.0}
+
     async def _wait_media(self, tab: _Tab, base: dict, kind: str, timeout: float,
                           on_progress, cancel: asyncio.Event | None) -> dict:
         base_atts = len(base.get("attachments", []))
         base_count = base.get("agentCount", 0)
+        grace = self._MEDIA_GRACE.get(kind, 8.0)
         started = time.monotonic()
-        text_stable, last_text = 0, ""
+        text_done_at: float | None = None
         while time.monotonic() - started < timeout:
             if cancel and cancel.is_set():
                 raise asyncio.CancelledError
             await asyncio.sleep(0.6)
             st = await self._state(tab)
-            atts = st.get("attachments", [])
-            fresh = [a for a in atts[base_atts:] if a.get("src") and a.get("kind") == kind]
+            new_atts = st.get("attachments", [])[base_atts:]
+            fresh = [a for a in new_atts if a.get("src") and a.get("kind") == kind]
             if fresh:
                 return fresh[-1]
             elapsed = time.monotonic() - started
             if on_progress:
                 on_progress(min(95, int(elapsed / timeout * 100)))
-            # Assistant finished with text only -> it refused or misunderstood.
+            # An attachment node for this kind is on the page but its (blob) src
+            # has not loaded yet -> media is still finalising, keep waiting.
+            if any(kind in (a.get("tid") or "") for a in new_atts):
+                text_done_at = None
+                continue
+            # No attachment yet. The reply may be genuinely text-only (a refusal),
+            # or the attachment may simply lag the completion sentence.
             text = st.get("lastText", "")
             if st.get("agentCount", 0) > base_count and text and not st.get("generating"):
-                text_stable = text_stable + 1 if text == last_text else 0
-                last_text = text
-                if text_stable >= 8:
+                if text_done_at is None:
+                    text_done_at = time.monotonic()
+                elif time.monotonic() - text_done_at >= grace:
+                    # Last resort: media delivered as a link in the text bubble.
+                    probe = await tab.session.evaluate(dom.LAST_BUBBLE_MEDIA) or {}
+                    url = self._pick_media_url(probe.get("links", []), kind)
+                    if url:
+                        log.info("%s delivered as link in text bubble: %s", kind, url)
+                        return {"src": url, "kind": kind}
+                    log.info("%s: no media after %.0fs grace; links=%s html=%.300s",
+                             kind, grace, probe.get("links", []), probe.get("html", ""))
                     raise UpstreamRefused(f"upstream replied with text only: {text[:200]}")
+            else:
+                text_done_at = None
         raise UpstreamTimeout(f"{kind} generation timed out")
+
+    _VIDEO_EXT = (".mp4", ".webm", ".mov", ".m4v")
+    _IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif")
+    _MEDIA_HOSTS = ("videodelivery.net", "cloudflarestream.com", "cloudflarestorage.com",
+                    "amazonaws.com", "storage.googleapis.com", "blob.core.windows.net",
+                    "musecdn", "cdn.muse", "muse-cdn")
+    _MEDIA_PATHS = ("/media/", "/download", "/dl/", "/video", "/attachment", "/files/")
+
+    @classmethod
+    def _pick_media_url(cls, links: list[str], kind: str) -> str | None:
+        """Best media URL from a reply bubble, or None if nothing looks like one."""
+        exts = cls._VIDEO_EXT if kind == "video" else cls._IMAGE_EXT
+
+        def score(u: str) -> int:
+            low = u.lower()
+            path = low.split("?", 1)[0].split("#", 1)[0]
+            if u.startswith("blob:") or path.endswith(exts):
+                return 3
+            if any(h in low for h in cls._MEDIA_HOSTS):
+                return 2
+            if any(seg in low for seg in cls._MEDIA_PATHS):
+                return 1
+            return 0
+
+        cands = [u for u in links if u and not u.startswith(("mailto:", "javascript:"))]
+        cands.sort(key=score, reverse=True)
+        return cands[0] if cands and score(cands[0]) > 0 else None
 
     async def _download(self, tab: _Tab, att: dict, kind: str) -> MediaResult:
         res = await tab.session.evaluate(dom.fetch_as_base64(att["src"]), await_promise=True,

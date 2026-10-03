@@ -65,6 +65,26 @@ CHAT_STATE = f"""(() => {{
 }})()"""
 
 
+# Media links that the assistant delivered as a text bubble / anchor / <video>
+# element rather than as an inline attachment presentation. Scans the last agent
+# bubble for every candidate URL (anchor hrefs, media element srcs incl. blob:,
+# and bare URLs in the text) and returns the bubble HTML for diagnostics.
+LAST_BUBBLE_MEDIA = f"""(() => {{
+  const bubbles = [...document.querySelectorAll({q(AGENT_BUBBLE)})];
+  const b = bubbles.length ? bubbles[bubbles.length - 1] : null;
+  if (!b) return {{ links: [], html: '' }};
+  const urls = [];
+  const push = (u) => {{ if (u && !urls.includes(u)) urls.push(u); }};
+  b.querySelectorAll('video, source').forEach(m => push(m.currentSrc || m.src || ''));
+  b.querySelectorAll('a[href]').forEach(a => push(a.href || ''));
+  b.querySelectorAll('img').forEach(m => push(m.currentSrc || m.src || ''));
+  const text = b.innerText || '';
+  const re = /https?:\\/\\/[^\\s)<>"']+/g;
+  let mm; while ((mm = re.exec(text))) push(mm[0]);
+  return {{ links: urls, html: (b.outerHTML || '').slice(0, 2000) }};
+}})()"""
+
+
 def fill_input(text: str) -> str:
     """Set the textarea value through the native setter so React picks it up."""
     return f"""(() => {{
