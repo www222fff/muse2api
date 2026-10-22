@@ -90,6 +90,9 @@ class DriverCapabilities:
     image: bool = False
     image_edit: bool = False
     video: bool = False
+    # The first frame of a video request is actually used as the opening frame
+    # (image-to-video), not merely attached as loose context.
+    video_first_frame: bool = False
     renew_session: bool = False
     quota: bool = False
 

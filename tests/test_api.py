@@ -10,6 +10,18 @@ def test_health(client):
     assert client.get("/readyz").json()["ready"] is True
 
 
+def test_readyz_advertises_first_frame_capability(client):
+    # The mock driver ignores first frames; only the browser driver uses them.
+    driver = client.get("/readyz").json()["driver"]
+    assert driver["capabilities"] == {"video_first_frame": False}
+
+
+def test_browser_driver_declares_first_frame_capability():
+    from muse2api.drivers.browser.driver import BrowserDriver
+
+    assert BrowserDriver.capabilities.video_first_frame is True
+
+
 def test_auth_required(client):
     r = client.get("/v1/models")
     assert r.status_code == 401

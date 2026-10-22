@@ -88,7 +88,8 @@ class _Tab:
 class BrowserDriver(MuseDriver):
     name = "browser"
     capabilities = DriverCapabilities(
-        chat=True, chat_images=True, image=True, image_edit=True, video=True, renew_session=True
+        chat=True, chat_images=True, image=True, image_edit=True, video=True,
+        video_first_frame=True, renew_session=True,
     )
 
     def __init__(self, settings: Settings) -> None:
