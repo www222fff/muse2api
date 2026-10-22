@@ -695,6 +695,14 @@ class BrowserDriver(MuseDriver):
 
     async def generate_video(self, account: Account, req: VideoRequest) -> MediaResult:
         prompt = self._media_prompt(req.prompt, "video", req.size, req.duration)
+        if req.first_frame:
+            # Without an explicit instruction muse.ai treats the attachment as loose
+            # context and renders plain text-to-video.
+            prompt = (
+                "Animate the attached image into a video. Use the attached image exactly as "
+                "the first frame: keep its composition, subjects, colours and style, and "
+                f"continue the motion from it. {prompt}"
+            )
         images = [req.first_frame] if req.first_frame else []
         return await self._generate(account, prompt, images, "video", req.timeout,
                                     req.on_progress, req.cancel)
