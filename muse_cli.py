@@ -150,8 +150,8 @@ def display_models(current_model: str = ""):
         items = []
 
     for m in items:
-        is_active = (m.id == current_model)
-        star = f"{BOLD}{C_GREEN} ➜ {RST}" if is_active else f"   "
+        is_active = m.id == current_model
+        star = f"{BOLD}{C_GREEN} ➜ {RST}" if is_active else "   "
         act = f" {BOLD}{C_GREEN}(Active){RST}" if is_active else ""
         kind = getattr(m, "kind", "chat")
         print(f"{star}{C_CYAN}{m.id:<30}{RST} {C_GRAY}[{kind}]{RST}{act}")
@@ -241,6 +241,42 @@ def _handle_save(prompt: str, last_reply: str) -> None:
         print(f"\n{C_RED}✗ {msg}{RST}\n")
 
 
+def _handle_open_cmd(
+    prompt: str,
+    model: str,
+    history: list,
+    last_reply: str,
+) -> tuple[str, list, str, str]:
+    """Attach a local path and feed an inspection prompt to the model."""
+    target = prompt.split(maxsplit=1)[1].strip()
+    p = Path(target)
+    if not p.is_absolute():
+        p = get_default_workspace() / p
+    if not p.exists():
+        print(f"\n{C_RED}✗ Path not found: {target}{RST}\n")
+        return "continue", history, last_reply, model
+    sub_prompt = f"Please inspect the attached local code and analyze it:\n{p}"
+    reply, actual_prompt = stream_chat(sub_prompt, model=model, history=history)
+    if reply:
+        history.append({"role": "user", "content": actual_prompt})
+        history.append({"role": "assistant", "content": reply})
+        last_reply = reply
+    return "continue", history, last_reply, model
+
+
+def _handle_cd_cmd(prompt: str, model: str, history: list,
+                   last_reply: str) -> tuple[str, list, str, str]:
+    """Switch the active workspace directory."""
+    new_ws = prompt.split(maxsplit=1)[1].strip()
+    new_p = Path(new_ws)
+    if new_p.is_dir():
+        os.environ["MUSE_WORKSPACE_ROOT"] = str(new_p)
+        print(f"\n{C_GREEN}✓ Active workspace switched to: {new_p}{RST}\n")
+    else:
+        print(f"\n{C_RED}✗ Directory not found: {new_ws}{RST}\n")
+    return "continue", history, last_reply, model
+
+
 def _dispatch_command(
     prompt_lower: str,
     prompt: str,
@@ -268,29 +304,9 @@ def _dispatch_command(
         _handle_save(prompt, last_reply)
         return "continue", history, last_reply, model
     if prompt_lower.startswith(("/open ", "/file ", "/folder ")):
-        target = prompt.split(maxsplit=1)[1].strip()
-        p = Path(target)
-        if not p.is_absolute():
-            p = get_default_workspace() / p
-        if p.exists():
-            sub_prompt = f"Please inspect the attached local code and analyze it:\n{p}"
-            reply, actual_prompt = stream_chat(sub_prompt, model=model, history=history)
-            if reply:
-                history.append({"role": "user", "content": actual_prompt})
-                history.append({"role": "assistant", "content": reply})
-                last_reply = reply
-        else:
-            print(f"\n{C_RED}✗ Path not found: {target}{RST}\n")
-        return "continue", history, last_reply, model
+        return _handle_open_cmd(prompt, model, history, last_reply)
     if prompt_lower.startswith(("/cd ", "/workspace ")):
-        new_ws = prompt.split(maxsplit=1)[1].strip()
-        new_p = Path(new_ws)
-        if new_p.is_dir():
-            os.environ["MUSE_WORKSPACE_ROOT"] = str(new_p)
-            print(f"\n{C_GREEN}✓ Active workspace switched to: {new_p}{RST}\n")
-        else:
-            print(f"\n{C_RED}✗ Directory not found: {new_ws}{RST}\n")
-        return "continue", history, last_reply, model
+        return _handle_cd_cmd(prompt, model, history, last_reply)
     if prompt_lower in ("/status", "status"):
         show_status()
         return "continue", history, last_reply, model

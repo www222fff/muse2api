@@ -653,43 +653,59 @@ class BrowserDriver(MuseDriver):
         await self._checkin(tab)
         self.prewarm(account)
 
-    async def _poll_stream(self, tab: _Tab, req: ChatRequest, base_count: int,
-                           base_text: str, started: float, emitted: str,
-                           last, stable: int, got_first: bool) -> tuple[str, str, int, bool, bool, str | None]:
-        """Poll the tab once; returns (emitted, last, stable, got_first, finished, delta)."""
+    @dataclass
+    class _StreamState:
+        """Mutable polling state shared across stream iterations."""
+        base_count: int
+        base_text: str
+        started: float
+        emitted: str = ""
+        last: str | None = None
+        stable: int = 0
+        got_first: bool = False
+
+    async def _poll_stream(self, tab: _Tab, req: ChatRequest,
+                           state: _StreamState) -> tuple[_StreamState, bool, str | None]:
+        """Poll the tab once; returns (state, finished, delta)."""
         if req.cancel and req.cancel.is_set():
-            return emitted, last, stable, got_first, True, None
-        elapsed = time.monotonic() - started
-        self._enforce_stream_deadlines(req, elapsed, got_first)
+            return state, True, None
+        elapsed = time.monotonic() - state.started
+        self._enforce_stream_deadlines(req, elapsed, state.got_first)
         await asyncio.sleep(POLL_INTERVAL)
         st = await self._state(tab)
         if st.get("approval"):
             await self._deny_approvals(tab)
-            return emitted, last, stable, got_first, False, None
+            return state, False, None
         text = st.get("lastText", "")
-        is_new = st.get("agentCount", 0) > base_count or (text and text != base_text)
+        is_new = st.get("agentCount", 0) > state.base_count or (text and text != state.base_text)
         if not is_new or not text:
             self._raise_if_stalled(elapsed, st)
-            return emitted, last, stable, got_first, False, None
-        if text != last:
-            delta = text[len(emitted):] if text.startswith(emitted) else text
-            emitted = text
-            return emitted, text, 0, True, False, delta
-        stable += 1
-        if self._stream_settled(st, stable):
-            return emitted, last, stable, True, True, None
-        return emitted, last, stable, True, False, None
+            return state, False, None
+        if text != state.last:
+            previous = state.emitted
+            state.emitted = text
+            state.last = text
+            state.stable = 0
+            state.got_first = True
+            delta = text[len(previous):] if text.startswith(previous) else text
+            return state, False, delta
+        state.stable += 1
+        state.got_first = True
+        if self._stream_settled(st, state.stable):
+            return state, True, None
+        return state, False, None
 
     async def chat_stream(self, account: Account, req: ChatRequest) -> AsyncIterator[str]:
         tab, base = await self._begin_chat(account, req)
-        base_count, base_text = base.get("agentCount", 0), base.get("lastText", "")
-        started = time.monotonic()
-        emitted, last, stable, got_first = "", None, 0, False
+        state = self._StreamState(
+            base_count=base.get("agentCount", 0),
+            base_text=base.get("lastText", ""),
+            started=time.monotonic(),
+        )
         finished = False
         try:
             while True:
-                emitted, last, stable, got_first, finished, delta = await self._poll_stream(
-                    tab, req, base_count, base_text, started, emitted, last, stable, got_first)
+                state, finished, delta = await self._poll_stream(tab, req, state)
                 if finished:
                     return
                 if delta:

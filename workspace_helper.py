@@ -89,7 +89,8 @@ def _resolve_sister_imports(text: str, base: Path, found: list[Path]) -> None:
 
 def _attach_sister_modules(text: str, found: list[Path]) -> None:
     """Attach sibling modules next to any inspected Python file (when imports matter)."""
-    trigger_words = ("import", "cross-file", "check", "fix", "explore", "detector", "aging", "runner")
+    trigger_words = ("import", "cross-file", "check", "fix", "explore",
+                     "detector", "aging", "runner")
     if not any(term in text.lower() for term in trigger_words):
         return
     gap_sisters = (
@@ -224,7 +225,8 @@ def _append_path_context(p: Path, base: Path, blocks: list[str],
     if p.is_dir():
         files = _collect_code_files(p)
         _format_directory_block(p, blocks, files)
-        # If p is a specific subfolder (e.g. gap_reversal), also attach the actual code files inside it!
+        # If p is a specific subfolder (e.g. gap_reversal), also attach the
+        # actual code files inside it!
         if p != base and len(files) <= 15:
             for f_rel in files:
                 _append_small_file(p / f_rel, blocks, seen_files)
@@ -256,7 +258,8 @@ def save_code_to_file(path_str: str, code: str) -> tuple[bool, str]:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(code, encoding="utf-8")
         if p.suffix == ".py":
-            res = subprocess.run(["python", "-m", "py_compile", str(p)], capture_output=True, text=True)
+            res = subprocess.run(["python", "-m", "py_compile", str(p)],
+                                 capture_output=True, text=True, check=False)
             if res.returncode != 0:
                 return False, f"Syntax error: {res.stderr}"
         return True, f"Saved successfully to {p}"

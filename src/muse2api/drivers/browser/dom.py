@@ -274,7 +274,8 @@ def parse_usage_text(text: str | None) -> dict[str, Any]:
             break
         if _used_pct(ln) is not None:
             continue
-        if re.search(r"\b\d+[A-Z]?\s+(?:tokens?|令牌|憑證|代幣)(?:\s+(?:left|remaining))?\b", ln, re.IGNORECASE):
+        if re.search(r"\b\d+[A-Z]?\s+(?:tokens?|令牌|憑證|代幣)"
+                     r"(?:\s+(?:left|remaining))?\b", ln, re.IGNORECASE):
             out["extra_left"] = ln.strip()
             break
     out["found"] = out["weekly_used_pct"] is not None
