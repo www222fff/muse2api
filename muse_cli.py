@@ -103,14 +103,10 @@ def stream_chat(
     history: list | None = None,
 ) -> tuple[str, str]:
     """Stream chat response with live output inside assistant container."""
-    paths = find_local_paths(prompt)
-    if paths:
-        ctx = build_context_for_paths(paths)
-        print_user_box(prompt, paths)
-        actual_prompt = f"{ctx}\n\n[User Instruction]: {prompt}"
-    else:
-        print_user_box(prompt)
-        actual_prompt = prompt
+    paths = find_local_paths(prompt, history=history)
+    ctx = build_context_for_paths(paths, prompt=prompt)
+    print_user_box(prompt, paths)
+    actual_prompt = f"{ctx}\n\n[User Instruction]: {prompt}"
 
     messages = list(history or [])
     messages.append({"role": "user", "content": actual_prompt})

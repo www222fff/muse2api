@@ -89,22 +89,24 @@ def _resolve_sister_imports(text: str, base: Path, found: list[Path]) -> None:
 
 def _attach_sister_modules(text: str, found: list[Path]) -> None:
     """Attach sibling modules next to any inspected Python file (when imports matter)."""
-    trigger_words = ("import", "cross-file", "check", "fix", "explore",
-                     "detector", "aging", "runner")
+    trigger_words = (
+        "import", "cross-file", "check", "fix", "explore", "detector",
+        "aging", "runner", "evaluate", "fixes", "remaining", "module", "gap"
+    )
     if not any(term in text.lower() for term in trigger_words):
         return
     gap_sisters = (
         "config.py", "gap_quality_filters.py", "models.py", "__init__.py",
         "aging_detector.py", "aging_execution.py", "aging_runner.py",
         "dynamic_ledger.py", "runner.py", "gap_entry_confirmation.py",
+        "gap_quality_filters.py", "detector.py",
     )
     for f in list(found):
-        if f.is_file() and f.suffix == ".py":
-            pkg_dir = f.parent
-            for s_name in gap_sisters:
-                s_path = pkg_dir / s_name
-                if s_path.exists() and s_path not in found:
-                    found.append(s_path)
+        pkg_dir = f.parent if f.is_file() else f
+        for s_name in gap_sisters:
+            s_path = pkg_dir / s_name
+            if s_path.exists() and s_path not in found:
+                found.append(s_path)
 
 
 def _attach_project_manifest(base: Path, found: list[Path]) -> None:
@@ -114,22 +116,66 @@ def _attach_project_manifest(base: Path, found: list[Path]) -> None:
         found.append(pyproj)
 
 
-def find_local_paths(text: str, base_dir: Path | None = None) -> list[Path]:
-    """Extract existing absolute and relative paths mentioned in user text."""
-    base = base_dir or get_default_workspace()
-    found: list[Path] = []
-    _find_absolute_paths(text, found)
-    _find_relative_paths(text, base, found)
-    keywords = (
-        "local file", "local repo", "workspace", "repo", "trading-firm",
-        "codebase", "make edit", "explore", "project", "gap_reversal"
+def get_git_context(base: Path, text: str) -> str:
+    """Retrieve git context (log, diff, status) if git commands or history are mentioned."""
+    t_lower = text.lower()
+    git_triggers = (
+        "commit", "commits", "git", "history", "diff", "log",
+        "recent changes", "push", "branch", "last 5", "last five"
     )
-    if not found and any(k in text.lower() for k in keywords):
-        found.append(base)
+    if not any(k in t_lower for k in git_triggers):
+        return ""
+    try:
+        status_res = subprocess.run(
+            ["git", "status", "--short"],
+            cwd=base, capture_output=True, text=True, timeout=5.0
+        )
+        log_res = subprocess.run(
+            ["git", "log", "-5", "--stat", "--pretty=format:Commit: %h | Date: %ad | Subject: %s"],
+            cwd=base, capture_output=True, text=True, timeout=8.0
+        )
+        recent_diff = subprocess.run(
+            ["git", "show", "--stat", "HEAD"],
+            cwd=base, capture_output=True, text=True, timeout=8.0
+        )
+        return (
+            f"\n[Local Git Context — 5 Most Recent Commits and Diff Stat]\n"
+            f"Active Branch & Status:\n{status_res.stdout.strip() or 'Clean working tree'}\n\n"
+            f"Recent Commits:\n{log_res.stdout.strip()}\n\n"
+            f"Latest Commit Diff Stat:\n{recent_diff.stdout[:4000].strip()}\n"
+        )
+    except Exception as e:
+        return f"\n[Git Context Fetch Error: {e}]\n"
 
-    if found:
-        _resolve_sister_imports(text, base, found)
 
+def find_local_paths(
+    text: str,
+    base_dir: Path | None = None,
+    history: list[dict] | None = None,
+) -> list[Path]:
+    """Extract existing absolute and relative paths mentioned in user text or recent history."""
+    base = base_dir or get_default_workspace()
+    combined_text = text
+    if history:
+        for msg in reversed(history[-2:]):
+            combined_text += " " + str(msg.get("content", ""))
+
+    found: list[Path] = []
+    _find_absolute_paths(combined_text, found)
+    _find_relative_paths(combined_text, base, found)
+
+    # If gap_reversal is referenced or implied, locate the module directory directly
+    triggers = ("gap_reversal", "aging", "remaining gap", "detector", "runner", "fixes required")
+    if any(k in combined_text.lower() for k in triggers):
+        gap_dir = base / "options_trading" / "strategies" / "gap_reversal"
+        if gap_dir.is_dir() and gap_dir not in found:
+            found.append(gap_dir)
+
+    # Always ensure base workspace is included
+    if not found or base not in found:
+        found.insert(0, base)
+
+    _resolve_sister_imports(combined_text, base, found)
     return found
 
 
@@ -198,21 +244,27 @@ def _format_file_block(p: Path, max_chars: int, blocks: list[str]) -> None:
         blocks.append(f"\n[Error reading {p}: {e}]")
 
 
-def build_context_for_paths(paths: list[Path], max_chars: int = 35000) -> str:
+def build_context_for_paths(
+    paths: list[Path],
+    prompt: str = "",
+    max_chars: int = 35000,
+) -> str:
     """Build a structured context block from local files or directories."""
-    if not paths:
-        return ""
-
     base = get_default_workspace()
     blocks = [
         "[Local Workspace Access Enabled - Connected to macOS Machine]",
         f"Connected Workspace Root: {base}",
-        "Local file access is active. You can inspect local files and provide code updates.",
+        "Local file and repository access is active. You have full visibility into the local workspace.",
         "When providing code edits, output the full code in a ```python ... ``` code block.",
         "The user CLI supports saving your code directly to disk via `/save <filepath>`.",
+        "DO NOT say you lack access or request file uploads when files or git info are provided below.",
     ]
-    seen_files: set[Path] = set()
+    if prompt:
+        git_ctx = get_git_context(base, prompt)
+        if git_ctx:
+            blocks.append(git_ctx)
 
+    seen_files: set[Path] = set()
     for p in paths:
         _append_path_context(p, base, blocks, seen_files, max_chars)
 
