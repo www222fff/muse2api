@@ -85,35 +85,57 @@ def _plain_text(node: _Node) -> str:
 
 
 def _inline(children: list[_Node | str]) -> str:
+    """Inline rendering WITHOUT edge stripping: a space at an element's edge
+    is a word separator in the flow, and the final bubble often carries it
+    inside the inline element (``<strong> displayed </strong>``). Stripping
+    it here joined words ("neverdisplayed"); block-level callers strip the
+    edges of the whole block instead, and _inline_node moves an element's
+    own edge spaces outside its markdown markers."""
     parts: list[str] = []
     for child in children:
         if isinstance(child, str):
             parts.append(_WS_RUN.sub(" ", child))
         else:
             parts.append(_inline_node(child))
-    text = _AROUND_NL.sub("\n", "".join(parts))
-    return text.strip(" ") if "\n" not in text else text.strip()
+    text = ""
+    for part in parts:
+        # A boundary space may sit on both sides of an element junction
+        # (trailing the previous text and leading the element); keep one.
+        if text.endswith(" ") and part.startswith(" "):
+            part = part[1:]
+        text += part
+    return _AROUND_NL.sub("\n", text)
+
+
+def _edge_ws(text: str) -> tuple[str, str, str]:
+    """(leading spaces, core, trailing spaces) of an inline element's text."""
+    core = text.strip(" ")
+    if not core:
+        return text, "", ""
+    lead = text[: len(text) - len(text.lstrip(" "))]
+    trail = text[len(text.rstrip(" ")):]
+    return lead, core, trail
 
 
 def _inline_node(node: _Node) -> str:
     tag = node.tag
     if tag in ("strong", "b"):
-        inner = _inline(node.children)
-        return f"**{inner}**" if inner else ""
+        lead, core, trail = _edge_ws(_inline(node.children))
+        return f"{lead}**{core}**{trail}" if core else lead
     if tag in ("em", "i"):
-        inner = _inline(node.children)
-        return f"*{inner}*" if inner else ""
+        lead, core, trail = _edge_ws(_inline(node.children))
+        return f"{lead}*{core}*{trail}" if core else lead
     if tag == "code":
         inner = _WS_RUN.sub(" ", _plain_text(node)).strip()
         if not inner:
             return ""
         return f"`` {inner} ``" if "`" in inner else f"`{inner}`"
     if tag == "a":
-        inner = _inline(node.children)
+        lead, core, trail = _edge_ws(_inline(node.children))
         href = node.attrs.get("href", "").strip()
-        if not href or href.startswith(("#", "javascript:")) or inner == href:
-            return inner
-        return f"[{inner}]({href})" if inner else href
+        if not href or href.startswith(("#", "javascript:")) or core == href:
+            return lead + core + trail
+        return f"{lead}[{core}]({href}){trail}" if core else lead + href + trail
     if tag == "img":
         src = node.attrs.get("src", "").strip()
         return f"![{node.attrs.get('alt', '')}]({src})" if src else ""
@@ -176,7 +198,7 @@ def _list_item_lines(item: _Node, marker: str, depth: int) -> list[str]:
     run: list[_Node | str] = []
 
     def flush_run() -> None:
-        text = _inline(run)
+        text = _inline(run).strip()
         run.clear()
         if text:
             segments.append(("text", [text]))
@@ -187,7 +209,7 @@ def _list_item_lines(item: _Node, marker: str, depth: int) -> list[str]:
             segments.append(("list", _list_lines(part, depth + 1)))
         elif isinstance(part, _Node) and part.tag == "p":
             flush_run()
-            text = _inline(part.children)
+            text = _inline(part.children).strip()
             if text:
                 segments.append(("text", [text]))
         elif isinstance(part, _Node) and _is_block(part):
@@ -250,7 +272,7 @@ def _table(node: _Node) -> str:
             if not isinstance(child, _Node):
                 continue
             if child.tag == "tr":
-                rows.append([_inline(cell.children).replace("|", "\\|")
+                rows.append([_inline(cell.children).strip().replace("|", "\\|")
                              for cell in child.children
                              if isinstance(cell, _Node) and cell.tag in ("th", "td")])
             elif child.tag in ("thead", "tbody", "tfoot"):
@@ -271,9 +293,9 @@ def _table(node: _Node) -> str:
 def _block(node: _Node) -> str:
     tag = node.tag
     if tag in _HEADINGS:
-        return ("#" * int(tag[1]) + " " + _inline(node.children)).rstrip()
+        return ("#" * int(tag[1]) + " " + _inline(node.children).strip()).rstrip()
     if tag == "p":
-        return _inline(node.children)
+        return _inline(node.children).strip()
     if tag == "pre":
         return _fenced(node)
     if tag in ("ul", "ol"):
@@ -298,7 +320,7 @@ def _blocks(children: list[_Node | str]) -> list[str]:
     inline_run: list[_Node | str] = []
 
     def flush() -> None:
-        text = _inline(inline_run)
+        text = _inline(inline_run).strip()
         inline_run.clear()
         if text:
             blocks.append(text)

@@ -55,6 +55,18 @@ from .html_markdown import html_to_markdown
 
 log = logging.getLogger(__name__)
 
+# Opt-in per-request tracing (MUSE2API_DEBUG_PROMPT=1): which thread a request
+# went to (new or reused), the full prompt as sent, the fill length the page
+# reported, and the bubble counts/index the reply was read from. Prompts are
+# user content already in transit; credentials are never logged.
+_DEBUG_PROMPT = os.environ.get("MUSE2API_DEBUG_PROMPT", "") not in ("", "0")
+
+
+def _prompt_debug(message: str) -> None:
+    if _DEBUG_PROMPT:
+        log.info("prompt-debug %s", message)
+
+
 POLL_INTERVAL = 0.15
 STABLE_POLLS_DONE = 4
 STABLE_POLLS_FORCE = 12
@@ -463,7 +475,10 @@ class BrowserDriver(MuseDriver):
             # A busy page can leave Runtime.evaluate unanswered while it loads; poll again.
             with contextlib.suppress(CDPError, TimeoutError):
                 state = await tab.session.evaluate(dom.PAGE_STATE, timeout=5.0) or {}
-                if state.get("ready"):
+                # Ready is not enough: the app may have redirected the
+                # navigation back to the previous thread, whose composer would
+                # silently take this request's prompt.
+                if state.get("ready") and state.get("path") == "/thread/new":
                     return
         head = (state.get("head") or "").lower()
         if any(h in head for h in dom.LOGIN_HINTS):
@@ -486,6 +501,10 @@ class BrowserDriver(MuseDriver):
         res = await tab.session.evaluate(dom.fill_input(prompt))
         if not (res or {}).get("ok"):
             raise UpstreamError(f"cannot fill chat input: {(res or {}).get('err')}")
+        _prompt_debug(f"fill page_len={(res or {}).get('len')} prompt_len={len(prompt)}")
+        if (res or {}).get("len") != len(prompt):
+            log.warning("chat input holds %s chars, prompt has %s — the page "
+                        "truncated the prompt", (res or {}).get("len"), len(prompt))
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             if await tab.session.evaluate(dom.CLICK_SEND) == "clicked":
@@ -596,6 +615,11 @@ class BrowserDriver(MuseDriver):
             # would share one thread. Prefer a fresh/stateless tab instead.
             tab = await self._checkout(account, prefer=lambda t: not t.has_state)
         prompt, images = req.prompt, req.images
+        previous_url = ""
+        with contextlib.suppress(Exception):  # the URL only feeds a guard
+            previous_url = await self._href(tab)
+        _prompt_debug(f"begin hint={hint!r} tab_url_before={previous_url!r} "
+                      f"tab_warm={tab.warm} tab_turns={len(tab.turns)}")
         try:
             # The saved conversation (restored after a restart) may only go into a
             # tab while no other tab of the account already holds a conversation.
@@ -608,9 +632,11 @@ class BrowserDriver(MuseDriver):
             # sends the full prompt, which keeps the model in context.
             same_owner = bool(hint) and (tab.hint or "") == hint
             follow = followup_text(tab.turns, req.turns) if tab.turns and same_owner else None
+            fresh = False
             if follow and len(req.images) >= tab.image_count and (
                 tab.thread_url or await self._live_continuation(tab)
             ):
+                _prompt_debug("thread=reused (follow-up on the saved conversation)")
                 if await self._on_thread(tab) or await self._live_continuation(tab):
                     log.info("reusing hot page %s", tab.thread_url or "open page")
                 elif tab.thread_url:
@@ -624,11 +650,31 @@ class BrowserDriver(MuseDriver):
                     account.meta.pop("hot_page", None)
                 if tab.warm:
                     log.info("using a warm thread")
+                    _prompt_debug("thread=warm (started thread, warm-up history only)")
                     self._forget(tab)
                 else:
                     log.info("opening a new thread")
+                    _prompt_debug("thread=new")
                     await self._new_thread(tab)
+                    fresh = True
             base = await self._state(tab)
+            if fresh and base.get("agentCount"):
+                # The navigation claimed a fresh thread but the page still
+                # shows the previous conversation: sending here would post
+                # into that thread, and polling could read its bubbles.
+                log.warning("new thread still shows %s agent bubbles; "
+                            "navigating again", base.get("agentCount"))
+                await self._new_thread(tab)
+                base = await self._state(tab)
+                if base.get("agentCount"):
+                    raise UpstreamError(
+                        "could not open a fresh thread: the page still shows "
+                        "the previous conversation")
+            if fresh:
+                base["previousUrl"] = previous_url
+            _prompt_debug(f"base agent_count={base.get('agentCount')} "
+                          f"base_last_len={len(base.get('lastText', ''))} "
+                          f"prompt_len={len(prompt)} prompt>>>{prompt}<<<")
             await self._attach(tab, images)
             await self._send(tab, prompt)
             return tab, base
@@ -649,7 +695,7 @@ class BrowserDriver(MuseDriver):
         ``UpstreamTimeout`` on timeouts and a stalled page. The caller owns
         the tab's checkin via ``_finish_chat``.
         """
-        base_count, base_text = base.get("agentCount", 0), base.get("lastText", "")
+        base_count = base.get("agentCount", 0)
         started = time.monotonic()
         last, stable, got_first = None, 0, False
         while True:
@@ -666,7 +712,18 @@ class BrowserDriver(MuseDriver):
                 await self._deny_approvals(tab)
                 continue
             text = st.get("lastText", "")
-            is_new = st.get("agentCount", 0) > base_count or (text and text != base_text)
+            # Only a NEW bubble counts: a text change in an existing bubble
+            # is the previous reply still rendering, never this request's.
+            is_new = st.get("agentCount", 0) > base_count
+            if is_new and not got_first:
+                previous = base.get("previousUrl") or ""
+                if previous and is_thread_url(previous):
+                    current = await self._href(tab)
+                    if current and (urlsplit(current).path.rstrip("/")
+                                    == urlsplit(previous).path.rstrip("/")):
+                        raise UpstreamError(
+                            "the page went back to the previous thread; "
+                            "its reply was discarded")
             if not is_new or not text:
                 if elapsed > STALL_GIVE_UP and any(h in st.get("tail", "") for h in dom.STALL_HINTS):
                     raise UpstreamTimeout("upstream workspace is stuck connecting")
@@ -678,6 +735,10 @@ class BrowserDriver(MuseDriver):
             else:
                 stable += 1
                 if (not st.get("generating") and stable >= STABLE_POLLS_DONE) or stable >= STABLE_POLLS_FORCE:
+                    _prompt_debug(
+                        f"reply done agent_count={st.get('agentCount')} "
+                        f"bubble_index={(st.get('agentCount') or 1) - 1} "
+                        f"final_len={len(text)}")
                     return
 
     async def _finish_chat(self, tab: _Tab, account: Account, req: ChatRequest,
@@ -702,6 +763,7 @@ class BrowserDriver(MuseDriver):
         self.prewarm(account)
 
     async def chat_stream(self, account: Account, req: ChatRequest) -> AsyncIterator[str]:
+        _prompt_debug(f"request mode=stream model={req.model} hint={req.conversation_hint!r}")
         tab, base = await self._begin_chat(account, req)
         deltas = SnapshotDeltas()
         final = ""
@@ -731,6 +793,7 @@ class BrowserDriver(MuseDriver):
 
     async def chat_complete(self, account: Account, req: ChatRequest) -> str:
         """The final reply snapshot itself, not a join of streamed deltas."""
+        _prompt_debug(f"request mode=complete model={req.model} hint={req.conversation_hint!r}")
         tab, base = await self._begin_chat(account, req)
         final = ""
         finished = False

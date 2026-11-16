@@ -371,7 +371,7 @@ class _NavSession(_FakeSession):
         if expr == dom.FRESH_THREAD:
             return True
         if expr == dom.PAGE_STATE:
-            return {"ready": True}
+            return {"ready": True, "path": "/thread/new"}
         return {}
 
     async def send(self, method, params=None, **_):

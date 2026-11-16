@@ -137,3 +137,30 @@ def test_renderer_bullet_artifact_is_not_duplicated():
 def test_fence_outruns_backtick_runs_in_the_body():
     html = "<pre><code>before\n```\ninner\n```\nafter</code></pre>"
     assert html_to_markdown(html) == "````\nbefore\n```\ninner\n```\nafter\n````"
+
+
+def test_inline_boundary_spaces_inside_elements_survive():
+    # The final bubble often carries the boundary space INSIDE the inline
+    # element; stripping the element's inner text used to eat it, joining
+    # words ("neverdisplayed", "lock outtemporarily").
+    cases = [
+        ("<p>never <strong>displayed</strong> in plain text</p>",
+         "never **displayed** in plain text"),
+        ("<p>never<strong> displayed </strong>in plain text</p>",
+         "never **displayed** in plain text"),
+        ("<p>lock out<em> temporarily</em> after three tries</p>",
+         "lock out *temporarily* after three tries"),
+        ("<p>lock out <em>temporarily </em>after three tries</p>",
+         "lock out *temporarily* after three tries"),
+        ("<p>never<span> displayed </span>in plain text</p>",
+         "never displayed in plain text"),
+        ('<p>see <a href="https://x.test"> the docs </a>now</p>',
+         "see [the docs](https://x.test) now"),
+        ("<p><strong>bold</strong> <em>italic</em> tail</p>",
+         "**bold** *italic* tail"),
+        ("<ul><li>Email (required)</li></ul>", "- Email (required)"),
+        ("<ul><li><strong>Email</strong> (required)</li></ul>",
+         "- **Email** (required)"),
+    ]
+    for html, expected in cases:
+        assert html_to_markdown(html) == expected, html
