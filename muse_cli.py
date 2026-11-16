@@ -9,6 +9,7 @@ Features:
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -43,7 +44,154 @@ try:
 except ImportError:
     pass
 
-BASE_URL = os.environ.get("MUSE2API_URL", "http://127.0.0.1:18610/v1")
+PromptSession: Any = None
+ANSI: Any = None
+InMemoryHistory: Any = None
+FileHistory: Any = None
+KeyBindings: Any = None
+HAVE_PROMPT_TOOLKIT = False
+try:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.formatted_text import ANSI
+    from prompt_toolkit.history import FileHistory, InMemoryHistory
+    from prompt_toolkit.key_binding import KeyBindings
+    HAVE_PROMPT_TOOLKIT = True
+except ImportError:
+    pass
+
+SESSION_USER_ID = os.environ.get("MUSE_SESSION_ID") or f"muse_cli_{os.getpid()}"
+
+
+def _create_prompt_session() -> Any:
+    """Create a prompt_toolkit PromptSession with bracketed paste and multi-line support."""
+    if not HAVE_PROMPT_TOOLKIT:
+        return None
+    kb = KeyBindings()
+
+    @kb.add("enter")
+    def _handle_enter(event):
+        buf = event.current_buffer
+        text_before = buf.document.text_before_cursor
+        if text_before.endswith("\\"):
+            buf.delete_before_cursor(count=1)
+            buf.newline()
+        else:
+            buf.validate_and_handle()
+
+    # Shift+Return / Option+Return / Alt+Enter handlers across terminal emulators
+    @kb.add("c-j")
+    def _newline_cj(event):
+        event.current_buffer.newline()
+
+    @kb.add("escape", "enter")
+    def _newline_alt_enter(event):
+        event.current_buffer.newline()
+
+    @kb.add("escape", "c-j")
+    def _newline_alt_cj(event):
+        event.current_buffer.newline()
+
+    @kb.add("escape", "[", "1", "3", ";", "2", "u")
+    def _newline_csiu(event):
+        event.current_buffer.newline()
+
+    @kb.add("escape", "[", "2", "7", ";", "2", ";", "1", "3", "~")
+    def _newline_xterm(event):
+        event.current_buffer.newline()
+
+    @kb.add("escape", "O", "M")
+    def _newline_om(event):
+        event.current_buffer.newline()
+
+    hist_file = os.path.expanduser("~/.muse_history")
+    try:
+        history_backend = FileHistory(hist_file)
+    except Exception:
+        history_backend = InMemoryHistory()
+
+    return PromptSession(
+        history=history_backend,
+        key_bindings=kb,
+        multiline=True,
+    )
+
+
+def ensure_gateway() -> bool:
+    """Check if gateway is reachable; if not, automatically launch it."""
+    try:
+        r = httpx.get(f"{GATEWAY_BASE}/healthz", timeout=1.5)
+        if r.status_code == 200:
+            return True
+    except Exception:
+        pass
+
+    script = Path("/Users/Gaurav_Batra/muse2api/start_gateway.sh")
+    if not script.exists():
+        script = Path(__file__).resolve().parent / "start_gateway.sh"
+    if script.exists():
+        if HAVE_RICH and console:
+            console.print("\n[bold yellow]↻ Gateway is offline. Auto-starting muse2api gateway on port 18610...[/bold yellow]")
+        else:
+            print("\n↻ Gateway is offline. Auto-starting muse2api gateway on port 18610...")
+        try:
+            subprocess.run([str(script)], check=False, capture_output=True, timeout=10.0)
+            import time
+            for _ in range(16):
+                time.sleep(0.5)
+                try:
+                    if httpx.get(f"{GATEWAY_BASE}/healthz", timeout=1.5).status_code == 200:
+                        if HAVE_RICH and console:
+                            console.print("[bold green]✓ Gateway is online and ready.[/bold green]\n")
+                        else:
+                            print("✓ Gateway is online and ready.\n")
+                        return True
+                except Exception:
+                    pass
+        except Exception as e:
+            if HAVE_RICH and console:
+                console.print(f"[bold red]✗ Failed to start gateway: {e}[/bold red]\n")
+            else:
+                print(f"✗ Failed to start gateway: {e}\n")
+    return False
+
+
+def web_search(query: str, limit: int = 4) -> str:
+    """Fetch live web snippets from DuckDuckGo."""
+    try:
+        resp = httpx.post(
+            "https://lite.duckduckgo.com/lite/",
+            data={"q": query},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=6.0,
+        )
+        if resp.status_code == 200:
+            snippets = re.findall(r"class=\x27result-snippet\x27>(.*?)</td>", resp.text, re.DOTALL)
+            clean = [re.sub(r"<[^>]+>", "", s).strip() for s in snippets]
+            if clean:
+                return "\n".join(f"[Web Result {i+1}]: {s}" for i, s in enumerate(clean[:limit]))
+    except Exception as e:
+        return f"[Web Search Error: {e}]"
+    return "[No web search results found]"
+
+
+def compact_history(history: list[dict], max_turns: int = 4) -> list[dict]:
+    """Auto-compact history if it exceeds max_turns to prevent token explosion."""
+    if len(history) <= max_turns * 2:
+        return history
+    older_turns = history[:-4]
+    recent_turns = history[-4:]
+    summary_parts = []
+    for m in older_turns:
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        snippet = content[:140].replace("\n", " ").strip()
+        summary_parts.append(f"{role.capitalize()}: {snippet}...")
+    summary_msg = {
+        "role": "system",
+        "content": "[Previous Conversation Context Compacted]:\n" + "\n".join(summary_parts),
+    }
+    return [summary_msg] + recent_turns
+BASE_URL = os.environ.get("MUSE2API_BASE_URL", "http://127.0.0.1:18610/v1")
 GATEWAY_BASE = BASE_URL.rstrip("/v1").rstrip("/")
 API_KEY = os.environ.get("MUSE2API_API_KEY", "sk-muse2api-local-secret")
 ADMIN_KEY = os.environ.get("MUSE2API_ADMIN_KEY", "sk-muse2api-admin-secret")
@@ -116,7 +264,8 @@ def stream_chat(
     print_user_box(prompt, paths)
     actual_prompt = f"{ctx}\n\n[User Instruction]: {prompt}"
 
-    messages = list(history or [])
+    compacted = compact_history(list(history or []))
+    messages = list(compacted)
     messages.append({"role": "user", "content": actual_prompt})
 
     if HAVE_RICH and console:
@@ -140,12 +289,25 @@ def _stream_rich(messages: list, model: str) -> list[str]:
             refresh_per_second=8,
             console=console,
         ) as live:
-            stream = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                stream=True,
-                timeout=180.0,
-            )
+            try:
+                stream = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    stream=True,
+                    timeout=180.0,
+                    user=SESSION_USER_ID,
+                )
+            except Exception as conn_err:
+                if "connect" in str(conn_err).lower() and ensure_gateway():
+                    stream = client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        stream=True,
+                        timeout=180.0,
+                        user=SESSION_USER_ID,
+                    )
+                else:
+                    raise conn_err
             for chunk in stream:
                 delta = chunk.choices[0].delta.content or ""
                 full_text.append(delta)
@@ -178,12 +340,25 @@ def _stream_ansi(messages: list, model: str) -> list[str]:
     print(f"\n{BOLD}{C_PURPLE}╭── ■ WORKING │ MUSE ({model}) {div}{RST}")
     full_text: list[str] = []
     try:
-        stream = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            stream=True,
-            timeout=180.0,
-        )
+        try:
+            stream = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                stream=True,
+                timeout=180.0,
+                user=SESSION_USER_ID,
+            )
+        except Exception as conn_err:
+            if "connect" in str(conn_err).lower() and ensure_gateway():
+                stream = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    stream=True,
+                    timeout=180.0,
+                    user=SESSION_USER_ID,
+                )
+            else:
+                raise conn_err
         for chunk in stream:
             delta = chunk.choices[0].delta.content or ""
             full_text.append(delta)
@@ -335,8 +510,11 @@ def _handle_help() -> None:
         ("/git <command>", "Run git operations directly (e.g. /git status, /git diff)"),
         ("/open <path>", "Open and attach local file or folder to conversation context"),
         ("/save <path>", "Save code block from last reply directly to file"),
+        ("/search <query>", "Search the web via DuckDuckGo and feed live context to Muse"),
+        ("/compact", "Compact long conversation history to conserve context window"),
         ("/model <id>", "View available models or switch active model"),
         ("/cd <dir>", "Switch active workspace root directory"),
+        ("/restart", "Refresh gateway browser connection and renew tabs"),
         (STATUS_CMD, "Check gateway health and token quota"),
         ("clear", "Reset conversation context"),
         ("exit", "Exit session"),
@@ -355,7 +533,7 @@ def _handle_help() -> None:
         print()
 
 
-def _print_save_result(ok: bool, msg: str, rich: Any) -> None:
+def _print_save_result(ok: bool, msg: str) -> None:
     """Print save result message depending on output mode."""
     if console is not None:
         if ok:
@@ -369,7 +547,7 @@ def _print_save_result(ok: bool, msg: str, rich: Any) -> None:
             print(f"\n{C_RED}✗ {msg}{RST}\n")
 
 
-def _print_no_code_block(rich: Any) -> None:
+def _print_no_code_block() -> None:
     """Print 'no code block found' message."""
     if console is not None:
         console.print("[bold red]✗ No code block found in last reply to save.[/bold red]\n")
@@ -492,20 +670,66 @@ def _handle_status_cmd(prompt_lower, prompt, model, history, last_reply):
 
 
 def _handle_restart_cmd(prompt_lower, prompt, model, history, last_reply):
-    """Handle /restart, restart, /reset, reset commands to refresh gateway and connection."""
-    if prompt_lower in ("/restart", "restart", "/reset", "reset", "/renew"):
+    """Handle /restart, restart, /start, start, server start commands to refresh gateway and connection."""
+    triggers = (
+        "/restart", "restart", "/reset", "reset", "/renew",
+        "/start", "start", "server start", "start server", "start muse2api"
+    )
+    if prompt_lower in triggers or any(prompt_lower.startswith(pfx) for pfx in ("start", "server start", "satrt")):
         if HAVE_RICH and console:
-            console.print("\n[bold yellow]↻ Refreshing Muse gateway connection and browser tabs...[/bold yellow]")
+            console.print("\n[bold yellow]↻ Checking and refreshing Muse gateway connection...[/bold yellow]")
         else:
-            print("\n↻ Refreshing Muse gateway connection and browser tabs...")
+            print("\n↻ Checking and refreshing Muse gateway connection...")
+        ensure_gateway()
         try:
             httpx.post(f"{GATEWAY_BASE}/admin/accounts/renew_all", headers={"Authorization": f"Bearer {ADMIN_KEY}"}, timeout=5.0)
         except Exception:
             pass
         if HAVE_RICH and console:
-            console.print("[bold green]✓ Gateway tabs renewed. State: [bold blue]● IDLE / READY[/bold blue][/bold green]\n")
+            console.print("[bold green]✓ Gateway connection verified and tabs renewed. State: [bold blue]● IDLE / READY[/bold blue][/bold green]\n")
         else:
-            print("✓ Gateway tabs renewed. State: ● IDLE / READY\n")
+            print("✓ Gateway connection verified and tabs renewed. State: ● IDLE / READY\n")
+        return "continue", history, last_reply, model
+    return None
+
+
+def _handle_compact_cmd(prompt_lower, prompt, model, history, last_reply):
+    """Handle /compact command."""
+    if prompt_lower in ("/compact", "compact"):
+        orig_len = len(history)
+        history = compact_history(history, max_turns=3)
+        if HAVE_RICH and console:
+            console.print(
+                f"[bold green]✓ Conversation history compacted ({orig_len} ➜ {len(history)} messages).[/bold green]\n"
+            )
+        else:
+            print(f"\n{C_GREEN}✓ Conversation history compacted ({orig_len} ➜ {len(history)} messages).{RST}\n")
+        return "continue", history, last_reply, model
+    return None
+
+
+def _handle_search_cmd(prompt_lower, prompt, model, history, last_reply):
+    """Handle /search <query> command to perform live web search via DuckDuckGo."""
+    if prompt_lower.startswith("/search"):
+        parts = prompt.split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            if HAVE_RICH and console:
+                console.print("[bold yellow]Usage: /search <query>[/bold yellow]\n")
+            else:
+                print(f"\n{C_YELLOW}Usage: /search <query>{RST}\n")
+            return "continue", history, last_reply, model
+        query = parts[1].strip()
+        if HAVE_RICH and console:
+            console.print(f"\n[bold cyan]🔍 Searching the web for:[/bold cyan] {query}...")
+        else:
+            print(f"\n🔍 Searching the web for: {query}...")
+        results = web_search(query)
+        sub_prompt = f"Based on these live web search results:\n{results}\n\nUser Question: {query}"
+        reply, actual_prompt = stream_chat(sub_prompt, model=model, history=history)
+        if reply:
+            history.append({"role": "user", "content": actual_prompt})
+            history.append({"role": "assistant", "content": reply})
+            last_reply = reply
         return "continue", history, last_reply, model
     return None
 
@@ -529,6 +753,8 @@ _COMMAND_HANDLERS = [
     _handle_cd_cmd,
     _handle_status_cmd,
     _handle_restart_cmd,
+    _handle_compact_cmd,
+    _handle_search_cmd,
     _handle_help_cmd,
 ]
 
@@ -555,7 +781,8 @@ def _print_start_banner(ws, remote: str, branch: str, model: str) -> None:
             f"[bold cyan]Model:[/bold cyan] {model}  │  [bold green]Tokens:[/bold green] 4B Free Web Tier\n"
             f"[bold cyan]Workspace:[/bold cyan] {ws}\n"
             f"[bold cyan]GitHub:[/bold cyan]    {remote} [magenta]({branch})[/magenta]\n"
-            f"[bold yellow]Commands:[/bold yellow] /git <cmd>, /open <file>, /save <file>, /model <id>, /help"
+            f"[bold yellow]Commands:[/bold yellow] /git <cmd>, /open <file>, /save <file>, /search <query>, /compact, /help\n"
+            f"[dim cyan]Editor Tip: Enter sends │ Shift+Return (or Option+Return / line ending with \\) for new line[/dim cyan]"
         )
         console.print(
             Panel(
@@ -572,6 +799,7 @@ def _print_start_banner(ws, remote: str, branch: str, model: str) -> None:
     print(f"  {C_GRAY}Workspace:{RST} {C_WHITE}{ws}{RST}")
     print(f"  {C_GRAY}GitHub:{RST}    {C_YELLOW}{remote}{RST} {C_PURPLE}[{branch}]{RST}")
     print(f"  {C_GRAY}Shortcuts:{RST} {C_CYAN}/git <cmd>{RST}, {C_CYAN}/open <file>{RST}, {C_CYAN}/save <file>{RST}, {C_CYAN}/help{RST}")
+    print(f"  {C_GRAY}Editor:{RST}    {C_YELLOW}Enter sends │ Shift+Return or Option+Return for newline{RST}")
     print(f"{BOLD}{C_BLUE}" + "═" * w + f"{RST}\n")
 
 
@@ -580,15 +808,23 @@ def interactive_chat(model: str = DEFAULT_MODEL):
     ws = get_default_workspace()
     remote, branch = get_git_info(ws)
     _print_start_banner(ws, remote, branch, model)
+    ensure_gateway()
 
     history: list[dict] = []
     last_reply = ""
     current_model = model
+    session = _create_prompt_session()
 
     while True:
         try:
             prompt_indicator = f"\033[1;34m●\033[0m [{current_model}] You > "
-            prompt = input(prompt_indicator).strip()
+            if session is not None and sys.stdin.isatty():
+                prompt = session.prompt(
+                    ANSI(prompt_indicator),
+                    prompt_continuation=ANSI("\033[2m  ... \033[0m"),
+                ).strip()
+            else:
+                prompt = input(prompt_indicator).strip()
             if not prompt:
                 continue
 
@@ -646,7 +882,7 @@ def show_status():
             print(f"[Error]: {e}\n")
 
 
-def _show_status_rich(headers: dict, accounts: list, h) -> None:
+def _show_status_rich(headers: dict, accounts: list) -> None:
     """Render gateway status as a Rich table."""
     t = Table(title=f"Gateway Status: {GATEWAY_BASE}", border_style="blue")
     t.add_column("Account", style="cyan")

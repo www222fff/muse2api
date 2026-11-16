@@ -3,7 +3,40 @@
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
+
+_REPO_INDEX: dict[str, Path] = {}
+_LAST_INDEX_TIME: float = 0.0
+
+# Constants for known module paths
+LIQUIDITY_SWEEP_STRATEGY: str = "options_trading/strategies/liquidity_sweep"
+
+KNOWN_MODULES: dict[str, str] = {
+    "gap_reversal": "options_trading/strategies/gap_reversal",
+    "aging_gap": "options_trading/strategies/gap_reversal",
+    "liquidity_sweep": LIQUIDITY_SWEEP_STRATEGY,
+    "liquidity sweep": LIQUIDITY_SWEEP_STRATEGY,
+    "sw_sl": LIQUIDITY_SWEEP_STRATEGY,
+    "eqh_eql": LIQUIDITY_SWEEP_STRATEGY,
+    "pdh_pdl": LIQUIDITY_SWEEP_STRATEGY,
+    "atm_opening_range": "options_trading/strategies/atm_opening_range",
+    "hero_zero": "options_trading/strategies/hero_zero.py",
+    "order_block": "options_trading/common",
+    "shoonya": "options_trading/data/shoonya",
+    "angelone": "options_trading/data/angelone",
+    "fyers": "options_trading/data/fyers",
+    "sensibull": "options_trading/data/sensibull",
+}
+
+# Constants for file extensions
+EXT_PY: str = ".py"
+EXT_JSON: str = ".json"
+EXT_TOML: str = ".toml"
+EXT_YAML: str = ".yaml"
+EXT_YML: str = ".yml"
+EXT_MD: str = ".md"
+EXT_SH: str = ".sh"
 
 
 def get_default_workspace() -> Path:
@@ -14,6 +47,28 @@ def get_default_workspace() -> Path:
     cwd = Path(os.getcwd())
     trading_dir = Path("/Volumes/Drive D/Indian Firm/Ai-indian-trading-firm")
     return trading_dir if trading_dir.exists() else cwd
+
+
+def _get_file_index(base: Path) -> dict[str, Path]:
+    """In-memory cached file index of repository code files for instant O(1) resolution."""
+    global _REPO_INDEX, _LAST_INDEX_TIME
+    now = time.time()
+    if _REPO_INDEX and (now - _LAST_INDEX_TIME < 60.0):
+        return _REPO_INDEX
+
+    idx: dict[str, Path] = {}
+    skipped = {
+        ".git", ".venv", "venv", "__pycache__", "node_modules",
+        "graphify-out", "packaging", "starters", "scratch", "data", "logs"
+    }
+    for root, dirs, files in os.walk(base):
+        dirs[:] = [d for d in dirs if d not in skipped and not d.startswith(".")]
+        for f in files:
+            if f.endswith((EXT_PY, EXT_JSON, EXT_TOML, EXT_YAML, EXT_YML, EXT_MD, EXT_SH)):
+                idx[f.lower()] = Path(root) / f
+    _REPO_INDEX = idx
+    _LAST_INDEX_TIME = now
+    return _REPO_INDEX
 
 
 def _try_add_path(found: list[Path], cand: Path) -> bool:
@@ -36,77 +91,127 @@ def _find_absolute_paths(text: str, found: list[Path]) -> None:
 
 
 def _find_relative_paths(text: str, base: Path, found: list[Path]) -> None:
-    """Look for relative paths, filenames, or module folders in text."""
+    """Look for relative paths, filenames, or known module folders in text."""
+    idx = _get_file_index(base)
+    # Check for specific files with extensions
     for w in re.findall(r"[a-zA-Z0-9_\-/\\]+\.[a-zA-Z0-9]+", text):
-        _try_find_file_path(w, base, found, text)
+        cand = base / w
+        if _try_add_path(found, cand):
+            continue
+        fname = Path(w).name.lower()
+        if fname in idx:
+            _try_add_path(found, idx[fname])
 
-    # Also search for module directory names (e.g. gap_reversal, strategies, options_trading)
-    ignore_tokens = {
-        "check", "explore", "figure", "inspect", "files", "folder", "directory",
-        "imports", "import", "project", "workspace", "local", "access", "enabled",
-        "please", "there", "their", "about", "would", "could", "should", "first",
-    }
-    for tok in re.findall(r"\b[a-zA-Z0-9_-]{4,}\b", text):
-        if tok.lower() not in ignore_tokens:
-            _try_find_dir_path(tok, base, found)
-
-
-def _try_find_file_path(w: str, base: Path, found: list[Path], text: str = "") -> None:
-    """Try to resolve a relative file path (and glob for deeper matches)."""
-    cand = base / w
-    if _try_add_path(found, cand):
-        return
-    if "." in w:
-        matches = [m for m in base.glob(f"**/{w}") if not any(p.startswith(".") for p in m.parts)]
-        if matches:
-            if text and len(matches) > 1:
-                t_lower = text.lower()
-                matches.sort(
-                    key=lambda m: -sum(1 for part in m.parts if part.lower() in t_lower)
-                )
-            if matches[0] not in found:
-                found.append(matches[0])
-
-
-def _try_find_dir_path(tok: str, base: Path, found: list[Path]) -> None:
-    """Try to resolve a module directory name (and glob for deeper matches)."""
-    cand = base / tok
-    if cand.is_dir() and _try_add_path(found, cand):
-        return
-    matches = [
-        m for m in base.glob(f"**/{tok}")
-        if m.is_dir() and not any(p.startswith(".") for p in m.parts)
-    ]
-    if matches and matches[0] not in found:
-        found.append(matches[0])
+    # Check for known module directories by direct dictionary lookup (instant)
+    text_lower = text.lower()
+    for mod_key, rel_path in KNOWN_MODULES.items():
+        if mod_key in text_lower:
+            cand = base / rel_path
+            if cand.exists() and cand not in found:
+                found.append(cand)
 
 
 def _resolve_sister_imports(text: str, base: Path, found: list[Path]) -> None:
     """If inspecting a python file, resolve imported sister modules in the same package."""
-    _attach_sister_modules(text, found)
+    _attach_sister_modules(text, base, found)
+    _attach_sweep_modules(text, base, found)
+    _attach_dirty_files(text, base, found)
     _attach_project_manifest(base, found)
 
 
-def _attach_sister_modules(text: str, found: list[Path]) -> None:
-    """Attach sibling modules next to any inspected Python file (when imports matter)."""
-    trigger_words = (
-        "import", "cross-file", "check", "fix", "explore", "detector",
-        "aging", "runner", "evaluate", "fixes", "remaining", "module", "gap"
-    )
-    if not any(term in text.lower() for term in trigger_words):
-        return
-    gap_sisters = (
+def _has_gap_triggers(text: str) -> bool:
+    """Check if text mentions gap reversal or aging gap strategies."""
+    t_lower = text.lower()
+    return any(k in t_lower for k in ("gap_reversal", "aging_gap", "aging_detector"))
+
+
+def _get_gap_sisters() -> tuple[str, ...]:
+    """Get the list of sister module names for gap strategies."""
+    return (
         "config.py", "gap_quality_filters.py", "models.py", "__init__.py",
         "aging_detector.py", "aging_execution.py", "aging_runner.py",
         "dynamic_ledger.py", "runner.py", "gap_entry_confirmation.py",
-        "gap_quality_filters.py", "detector.py",
     )
+
+
+def _attach_sister_modules(text: str, base: Path, found: list[Path]) -> None:
+    """Attach sibling modules next to any inspected Python file only when relevant."""
+    if not _has_gap_triggers(text):
+        return
+
+    gap_sisters = _get_gap_sisters()
     for f in list(found):
-        pkg_dir = f.parent if f.is_file() else f
-        for s_name in gap_sisters:
-            s_path = pkg_dir / s_name
+        if "gap_reversal" in str(f):
+            pkg_dir = f if f.is_dir() else f.parent
+            for s_name in gap_sisters:
+                s_path = pkg_dir / s_name
+                if s_path.exists() and s_path not in found:
+                    found.append(s_path)
+            break
+
+
+def _has_sweep_triggers(text: str) -> bool:
+    """Check if text mentions liquidity sweep or related strategies."""
+    t_lower = text.lower()
+    sweep_triggers = (
+        "liquidity_sweep", "sw_sl", "sweep", "eqh_eql", "pdh_pdl",
+        "naturalgas", "crudeoil", "silverm", "ultra_accuracy_95", "re-entry",
+        "sl floor", "sl_hit", "sl hit", "reclaim",
+    )
+    return any(k in t_lower for k in sweep_triggers)
+
+
+def _get_sweep_core() -> tuple[str, ...]:
+    """Get the core sweep module names."""
+    return (
+        "option_sweep_detector.py", "option_sweep_scanner.py", "config.py",
+        "commodity_params.py", "runner.py", "_runner_dispatch_impl.py", "models.py",
+    )
+
+
+def _attach_sweep_modules(text: str, base: Path, found: list[Path]) -> None:
+    """Attach liquidity sweep strategy modules when triggered."""
+    if not _has_sweep_triggers(text):
+        return
+    sweep_dir = base / "options_trading" / "strategies" / "liquidity_sweep"
+    if sweep_dir.is_dir():
+        if sweep_dir not in found:
+            found.append(sweep_dir)
+        for s_name in _get_sweep_core():
+            s_path = sweep_dir / s_name
             if s_path.exists() and s_path not in found:
                 found.append(s_path)
+
+
+def _attach_dirty_files(text: str, base: Path, found: list[Path], max_count: int = 3) -> None:
+    """Attach recently modified git files only when explicitly discussing patches or reviews."""
+    t_lower = text.lower()
+    patch_triggers = (
+        "patch", "uncommitted", "dirty", "git diff", "git status",
+        "review my changes", "review diff", "review modified",
+    )
+    if not any(k in t_lower for k in patch_triggers):
+        return
+    try:
+        res = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=base, capture_output=True, text=True, timeout=2.0
+        )
+        if res.returncode == 0:
+            count = 0
+            for line in res.stdout.splitlines():
+                if len(line) < 4:
+                    continue
+                rel_f = line[3:].strip()
+                if rel_f.endswith((".py", ".toml")):
+                    f_path = base / rel_f
+                    if f_path.is_file() and f_path not in found:
+                        found.append(f_path)
+                        count += 1
+                        if count >= max_count:
+                            break
+    except Exception:
+        pass
 
 
 def _attach_project_manifest(base: Path, found: list[Path]) -> None:
@@ -120,29 +225,29 @@ def get_git_context(base: Path, text: str) -> str:
     """Retrieve git context (log, diff, status) if git commands or history are mentioned."""
     t_lower = text.lower()
     git_triggers = (
-        "commit", "commits", "git", "history", "diff", "log",
-        "recent changes", "push", "branch", "last 5", "last five"
+        "commit", "commits", "git log", "git history", "git diff",
+        "last 5 commits", "last five commits", "recent commits"
     )
     if not any(k in t_lower for k in git_triggers):
         return ""
     try:
         status_res = subprocess.run(
             ["git", "status", "--short"],
-            cwd=base, capture_output=True, text=True, timeout=5.0
+            cwd=base, capture_output=True, text=True, timeout=3.0
         )
         log_res = subprocess.run(
             ["git", "log", "-5", "--stat", "--pretty=format:Commit: %h | Date: %ad | Subject: %s"],
-            cwd=base, capture_output=True, text=True, timeout=8.0
+            cwd=base, capture_output=True, text=True, timeout=5.0
         )
         recent_diff = subprocess.run(
             ["git", "show", "--stat", "HEAD"],
-            cwd=base, capture_output=True, text=True, timeout=8.0
+            cwd=base, capture_output=True, text=True, timeout=5.0
         )
         return (
             f"\n[Local Git Context — 5 Most Recent Commits and Diff Stat]\n"
             f"Active Branch & Status:\n{status_res.stdout.strip() or 'Clean working tree'}\n\n"
             f"Recent Commits:\n{log_res.stdout.strip()}\n\n"
-            f"Latest Commit Diff Stat:\n{recent_diff.stdout[:4000].strip()}\n"
+            f"Latest Commit Diff Stat:\n{recent_diff.stdout[:3000].strip()}\n"
         )
     except Exception as e:
         return f"\n[Git Context Fetch Error: {e}]\n"
@@ -152,30 +257,22 @@ def find_local_paths(
     text: str,
     base_dir: Path | None = None,
     history: list[dict] | None = None,
+    max_files: int = 5,
+    **kwargs,
 ) -> list[Path]:
-    """Extract existing absolute and relative paths mentioned in user text or recent history."""
+    """Extract existing paths mentioned in the active user prompt (capped to prevent token bloat)."""
     base = base_dir or get_default_workspace()
-    combined_text = text
-    if history:
-        for msg in reversed(history[-2:]):
-            combined_text += " " + str(msg.get("content", ""))
+    found: list[Path] = [base]
 
-    found: list[Path] = []
-    _find_absolute_paths(combined_text, found)
-    _find_relative_paths(combined_text, base, found)
+    # Search paths only from the active user instruction, never assistant responses
+    _find_absolute_paths(text, found)
+    _find_relative_paths(text, base, found)
+    _resolve_sister_imports(text, base, found)
 
-    # If gap_reversal is referenced or implied, locate the module directory directly
-    triggers = ("gap_reversal", "aging", "remaining gap", "detector", "runner", "fixes required")
-    if any(k in combined_text.lower() for k in triggers):
-        gap_dir = base / "options_trading" / "strategies" / "gap_reversal"
-        if gap_dir.is_dir() and gap_dir not in found:
-            found.append(gap_dir)
-
-    # Always ensure base workspace is included
-    if not found or base not in found:
-        found.insert(0, base)
-
-    _resolve_sister_imports(combined_text, base, found)
+    # Strictly cap total attached files to max_files (plus workspace root)
+    if len(found) > max_files + 1:
+        other_files = [p for p in found if p != base]
+        found = [base] + other_files[:max_files]
     return found
 
 
@@ -265,8 +362,13 @@ def build_context_for_paths(
             blocks.append(git_ctx)
 
     seen_files: set[Path] = set()
+    current_chars = sum(len(b) for b in blocks)
     for p in paths:
-        _append_path_context(p, base, blocks, seen_files, max_chars)
+        if current_chars >= max_chars:
+            break
+        file_cap = min(10000, max_chars - current_chars)
+        _append_path_context(p, base, blocks, seen_files, file_cap)
+        current_chars = sum(len(b) for b in blocks)
 
     return "\n".join(blocks)
 
@@ -277,11 +379,6 @@ def _append_path_context(p: Path, base: Path, blocks: list[str],
     if p.is_dir():
         files = _collect_code_files(p)
         _format_directory_block(p, blocks, files)
-        # If p is a specific subfolder (e.g. gap_reversal), also attach the
-        # actual code files inside it!
-        if p != base and len(files) <= 15:
-            for f_rel in files:
-                _append_small_file(p / f_rel, blocks, seen_files)
     elif p.is_file() and p not in seen_files:
         seen_files.add(p)
         _format_file_block(p, max_chars, blocks)
