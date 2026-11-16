@@ -50,8 +50,8 @@ _USER_DATA_DIR_RE = re.compile(r"--user-data-dir=(?:\"([^\"]+)\"|(\S+))")
 
 def _norm_path(raw: str) -> str:
     text = raw.strip().strip('"').replace("\\", "/").rstrip("/")
-    if len(text) > 1 and text[1] == ":":  # Windows drive path: case-insensitive
-        text = text.casefold()
+    if "\\" in raw or (len(text) > 1 and text[1] == ":"):
+        text = text.casefold()  # Windows-style path: case-insensitive
     return text
 
 
@@ -60,8 +60,35 @@ def _norm_variants(raw: str) -> set[str]:
     path = Path(raw.strip().strip('"')).expanduser()
     if not path.is_absolute():
         path = Path.cwd() / path
-    variants.add(_norm_path(str(path)))
+    resolved = _norm_path(str(path))
+    variants.add(resolved)
+    # A holder must never be missed over case alone (worst case on a truly
+    # case-sensitive filesystem: a false positive with a clear message).
+    variants.add(resolved.casefold())
     return variants
+
+
+def is_chrome_process(proc: ProcessInfo) -> bool:
+    cmdline = proc.command_line.lower()
+    tokens = cmdline.split()
+    exe = tokens[0].strip('"').replace("\\", "/").rsplit("/", 1)[-1] if tokens else ""
+    return (exe in ("chrome", "chromium", "chrome.exe", "chromium.exe",
+                    "google-chrome", "google-chrome-stable")
+            or "chrome.exe" in cmdline or "chromium.exe" in cmdline)
+
+
+def profile_possible_holders(profile_dir: Path,
+                             processes: list[ProcessInfo]) -> list[ProcessInfo]:
+    """Chrome processes that are not exact owners but whose command line
+    mentions the profile directory name — possible holders, worth naming
+    when Chrome later reports the profile as in use."""
+    name = profile_dir.name.casefold()
+    if not name:
+        return []
+    owners = {p.pid for p in profile_owners(profile_dir, processes)}
+    return [p for p in processes
+            if p.pid not in owners and is_chrome_process(p)
+            and name in p.command_line.replace("\\", "/").casefold()]
 
 
 def profile_owners(profile_dir: Path, processes: list[ProcessInfo]) -> list[ProcessInfo]:
@@ -89,37 +116,70 @@ def parse_process_lines(lines: list[str]) -> list[ProcessInfo]:
     return out
 
 
-def list_processes() -> list[ProcessInfo]:
-    """Best-effort snapshot of running processes; [] when enumeration fails."""
+@dataclass
+class ProcessScan:
+    """Outcome of a process enumeration: the processes found, and — kept
+    separate — the error when the scan itself failed or was inconclusive,
+    so 'no holder found' is never confused with 'could not look'."""
+
+    processes: list[ProcessInfo]
+    error: str | None = None
+
+    @property
+    def chrome_count(self) -> int:
+        return sum(1 for p in self.processes if is_chrome_process(p))
+
+
+def _run_scan_command(argv: list[str], timeout: float = 15) -> tuple[str, str | None]:
+    """Run an enumeration command; (stdout, error) — error is None on success."""
     try:
-        if sys.platform == "win32":
-            script = ("Get-CimInstance Win32_Process | "
-                      "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }")
-            done = subprocess.run(
-                ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-                capture_output=True, text=True, timeout=15)
-            return parse_process_lines(done.stdout.splitlines())
-        if sys.platform == "darwin":
-            done = subprocess.run(["ps", "-axo", "pid=,command="],
-                                  capture_output=True, text=True, timeout=15)
-            out = []
-            for line in done.stdout.splitlines():
-                parts = line.strip().split(None, 1)
-                if len(parts) == 2 and parts[0].isdigit():
-                    out.append(ProcessInfo(int(parts[0]), parts[1]))
-            return out
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return "", f"{argv[0]} process scan timed out after {timeout:g}s"
+    except OSError as exc:
+        return "", f"{argv[0]} process scan could not run: {exc}"
+    if done.returncode != 0:
+        tail = (done.stderr or "").strip().splitlines()
+        detail = tail[-1] if tail else f"exit code {done.returncode}"
+        return "", f"{argv[0]} process scan failed: {detail}"
+    return done.stdout, None
+
+
+def scan_processes(platform: str | None = None) -> ProcessScan:
+    """Snapshot running processes, reporting scan failure instead of hiding it."""
+    platform = platform or sys.platform
+    if platform == "win32":
+        script = ("Get-CimInstance Win32_Process | "
+                  "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }")
+        stdout, error = _run_scan_command(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script])
+        return ProcessScan(parse_process_lines(stdout.splitlines()), error)
+    if platform == "darwin":
+        stdout, error = _run_scan_command(["ps", "-axo", "pid=,command="])
         out = []
-        for entry in Path("/proc").iterdir():
-            if not entry.name.isdigit():
-                continue
-            with contextlib.suppress(OSError):
-                raw = (entry / "cmdline").read_bytes()
-                if raw:
-                    text = raw.replace(b"\0", b" ").decode("utf-8", "replace")
-                    out.append(ProcessInfo(int(entry.name), text))
-        return out
-    except Exception:
-        return []
+        for line in stdout.splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) == 2 and parts[0].isdigit():
+                out.append(ProcessInfo(int(parts[0]), parts[1]))
+        return ProcessScan(out, error)
+    try:
+        entries = list(Path("/proc").iterdir())
+    except OSError as exc:
+        return ProcessScan([], f"/proc process scan could not run: {exc}")
+    out = []
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        with contextlib.suppress(OSError):
+            raw = (entry / "cmdline").read_bytes()
+            if raw:
+                text = raw.replace(b"\0", b" ").decode("utf-8", "replace")
+                out.append(ProcessInfo(int(entry.name), text))
+    return ProcessScan(out)
+
+
+def list_processes() -> list[ProcessInfo]:
+    return scan_processes().processes
 
 
 def devtools_active_port(profile_dir: Path) -> int | None:
@@ -190,6 +250,33 @@ def _stop_hint(pids: list[int]) -> str:
     return "stop it with: " + "; ".join(f"kill {pid}" for pid in pids)
 
 
+_EXIT_CODE_MEANINGS = {21: "RESULT_CODE_PROFILE_IN_USE"}
+
+
+def _manual_holder_steps(profile_dir: Path, platform: str | None = None) -> str:
+    name = profile_dir.name
+    if (platform or sys.platform) == "win32":
+        return (
+            "  manual steps to find the holder:\n"
+            "    1. netstat -ano | findstr :18610 — a stale gateway listening on "
+            "the gateway port (default 18610) is the usual parent of the stale "
+            "Chrome; stop it with taskkill /F /PID <pid>.\n"
+            "    2. PowerShell: Get-CimInstance Win32_Process | Where-Object "
+            f"{{ $_.CommandLine -like '*{name}*' }} — lists processes whose "
+            "command line uses the profile.\n"
+            "    3. Resource Monitor (resmon.exe) → CPU tab → Associated Handles "
+            f"→ search '{name}' — shows which process holds the profile folder."
+        )
+    return (
+        "  manual steps to find the holder:\n"
+        "    1. lsof -i :18610 — a stale gateway listening on the gateway port "
+        "(default 18610) is the usual parent of the stale Chrome; stop it with "
+        "kill <pid>.\n"
+        f"    2. ps aux | grep {name} — lists processes using the profile.\n"
+        f"    3. lsof +D {profile_dir} — shows which process holds the folder."
+    )
+
+
 class ChromiumProcess:
     def __init__(self, executable: str, port: int, profile_dir: Path, headless: bool = True,
                  proxy: str = "", data_dir: Path | None = None):
@@ -202,6 +289,8 @@ class ChromiumProcess:
         self.output_log = profile_dir.parent / "chromium-output.log"
         self.proc: asyncio.subprocess.Process | None = None
         self._log_handle: TextIO | None = None
+        self._scan: ProcessScan | None = None
+        self._possible: list[ProcessInfo] = []
 
     @property
     def http_base(self) -> str:
@@ -226,8 +315,21 @@ class ChromiumProcess:
         for warning in profile_dir_warnings(self.profile_dir, self.data_dir):
             log.warning("%s", warning)
 
-        owners = profile_owners(
-            self.profile_dir, await asyncio.to_thread(list_processes))
+        self._scan = await asyncio.to_thread(scan_processes)
+        owners = profile_owners(self.profile_dir, self._scan.processes)
+        self._possible = profile_possible_holders(
+            self.profile_dir, self._scan.processes)
+        if self._scan.error:
+            log.warning("profile holder scan inconclusive: %s", self._scan.error)
+        else:
+            log.info("profile holder scan: %d processes, %d chrome.exe, "
+                     "%d exact holder(s), %d possible",
+                     len(self._scan.processes), self._scan.chrome_count,
+                     len(owners), len(self._possible))
+        if self._possible:
+            log.warning("possible profile holders (command line mentions '%s'): "
+                        "PID %s", self.profile_dir.name,
+                        ", ".join(str(p.pid) for p in self._possible))
         if owners:
             pids = [p.pid for p in owners]
             active = devtools_active_port(self.profile_dir)
@@ -284,17 +386,48 @@ class ChromiumProcess:
             await asyncio.sleep(0.5)
         raise RuntimeError(self._failure_message(args))
 
+    def _profile_in_use_section(self) -> str:
+        lines = ["Chromium exited with code 21 (RESULT_CODE_PROFILE_IN_USE): "
+                 "the profile is in use by another Chrome process."]
+        if self._possible:
+            lines.append("  possible holder PID(s): "
+                         + ", ".join(str(p.pid) for p in self._possible))
+            return "\n".join(lines) + "\n"
+        scan = self._scan
+        if scan is not None and scan.error:
+            lines.append(
+                "  no holder was identified — the pre-launch scan was "
+                f"inconclusive ({scan.error}), so a holder may have been missed.")
+        elif scan is not None:
+            lines.append(
+                "  no holder was identified — the pre-launch scan covered "
+                f"{scan.chrome_count} chrome.exe process(es) and found none; "
+                "the holder may have started after the scan or hold the profile "
+                "without a matching command line.")
+        else:
+            lines.append("  no holder was identified — no pre-launch scan ran.")
+        lines.append(_manual_holder_steps(self.profile_dir))
+        return "\n".join(lines) + "\n"
+
     def _failure_message(self, args: list[str]) -> str:
         if self._log_handle:
             self._log_handle.flush()
         exit_code = self.proc.returncode if self.proc else None
         tail = tail_lines(self.output_log)
+        if exit_code is None:
+            code_text = "still running when the wait timed out"
+        elif exit_code in _EXIT_CODE_MEANINGS:
+            code_text = f"{exit_code} ({_EXIT_CODE_MEANINGS[exit_code]})"
+        else:
+            code_text = str(exit_code)
+        head = self._profile_in_use_section() if exit_code == 21 else ""
         return (
-            "Chromium did not expose a DevTools endpoint\n"
+            head
+            + "Chromium did not expose a DevTools endpoint\n"
             f"  command: {subprocess.list2cmdline(args)}\n"
             f"  user-data-dir: {self.profile_dir}\n"
             f"  remote-debugging-port: {self.port}\n"
-            f"  exit code: {exit_code if exit_code is not None else 'still running when the wait timed out'}\n"
+            f"  exit code: {code_text}\n"
             f"  chromium output (last lines of {self.output_log}):\n"
             f"{tail or '(no output captured)'}"
         )
