@@ -145,8 +145,8 @@ class BrowserDriver(MuseDriver):
     async def shutdown(self) -> None:
         for task in self._warming.values():
             task.cancel()
-        for tabs in list(self._tabs.values()):
-            for tab in list(tabs):
+        for tabs in self._tabs.values():
+            for tab in tabs:
                 await self._close_tab(tab)
         if self._browser:
             await self._browser.close()

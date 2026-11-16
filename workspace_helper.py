@@ -37,7 +37,7 @@ def _find_absolute_paths(text: str, found: list[Path]) -> None:
 
 def _find_relative_paths(text: str, base: Path, found: list[Path]) -> None:
     """Look for relative paths, filenames, or module folders in text."""
-    for w in re.findall(r"[a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9]+", text):
+    for w in re.findall(r"[a-zA-Z0-9_\-/\\]+\.[a-zA-Z0-9]+", text):
         _try_find_file_path(w, base, found, text)
 
     # Also search for module directory names (e.g. gap_reversal, strategies, options_trading)

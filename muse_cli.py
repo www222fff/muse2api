@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import httpx
 from openai import OpenAI
@@ -24,6 +25,13 @@ from workspace_helper import (
     save_code_to_file,
 )
 
+Console: Any = None
+Live: Any = None
+Panel: Any = None
+Markdown: Any = None
+Table: Any = None
+console: Any = None
+HAVE_RICH = False
 try:
     from rich.console import Console
     from rich.live import Live
@@ -33,8 +41,7 @@ try:
     HAVE_RICH = True
     console = Console()
 except ImportError:
-    HAVE_RICH = False
-    console = None
+    pass
 
 BASE_URL = os.environ.get("MUSE2API_URL", "http://127.0.0.1:18610/v1")
 GATEWAY_BASE = BASE_URL.rstrip("/v1").rstrip("/")
@@ -112,53 +119,27 @@ def stream_chat(
     messages = list(history or [])
     messages.append({"role": "user", "content": actual_prompt})
 
-    full_text: list[str] = []
-
     if HAVE_RICH and console:
-        try:
-            with Live(
-                Panel(
-                    Markdown("Thinking..."),
-                    title=f"[bold red]■ WORKING (Ctrl+C to Stop)[/bold red] │ [bold magenta]MUSE ({model})[/bold magenta]",
-                    border_style="magenta",
-                ),
-                refresh_per_second=8,
-                console=console,
-            ) as live:
-                stream = client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    stream=True,
-                    timeout=180.0,
-                )
-                for chunk in stream:
-                    delta = chunk.choices[0].delta.content or ""
-                    full_text.append(delta)
-                    live.update(
-                        Panel(
-                            Markdown("".join(full_text)),
-                            title=f"[bold red]■ WORKING[/bold red] │ [bold magenta]MUSE ({model})[/bold magenta]",
-                            border_style="magenta",
-                        )
-                    )
-                live.update(
-                    Panel(
-                        Markdown("".join(full_text)),
-                        title=f"[bold blue]● IDLE / READY[/bold blue] │ [bold magenta]MUSE ({model})[/bold magenta]",
-                        border_style="blue",
-                    )
-                )
-            console.print()
-        except KeyboardInterrupt:
-            console.print("\n[bold red]■ STOPPED by user (Ctrl+C). Session preserved.[/bold red]\n")
-        except Exception as e:
-            console.print(f"[bold red][Error]: {e}[/bold red]\n")
+        full_text = _stream_rich(messages, model)
     else:
-        # Fallback ANSI streaming
-        w = _term_width()
-        div = "─" * max(10, w - 24)
-        print(f"\n{BOLD}{C_PURPLE}╭── ■ WORKING │ MUSE ({model}) {div}{RST}")
-        try:
+        full_text = _stream_ansi(messages, model)
+
+    return "".join(full_text), actual_prompt
+
+
+def _stream_rich(messages: list, model: str) -> list[str]:
+    """Stream a reply with the Rich live panel; returns collected text chunks."""
+    full_text: list[str] = []
+    try:
+        with Live(
+            Panel(
+                Markdown("Thinking..."),
+                title=f"[bold red]■ WORKING (Ctrl+C to Stop)[/bold red] │ [bold magenta]MUSE ({model})[/bold magenta]",
+                border_style="magenta",
+            ),
+            refresh_per_second=8,
+            console=console,
+        ) as live:
             stream = client.chat.completions.create(
                 model=model,
                 messages=messages,
@@ -168,21 +149,58 @@ def stream_chat(
             for chunk in stream:
                 delta = chunk.choices[0].delta.content or ""
                 full_text.append(delta)
-                sys.stdout.write(delta)
-                sys.stdout.flush()
-            print()
-        except KeyboardInterrupt:
-            print(f"\n{BOLD}{C_RED}■ STOPPED by user (Ctrl+C). Session preserved.{RST}\n")
-        except Exception as e:
-            print(f"\n{C_RED}[Error]: {e}{RST}")
-        finally:
-            div_end = "─" * max(10, w - 4)
-            print(f"{BOLD}{C_BLUE}╰── ● IDLE {div_end}{RST}\n")
+                live.update(
+                    Panel(
+                        Markdown("".join(full_text)),
+                        title=f"[bold red]■ WORKING[/bold red] │ [bold magenta]MUSE ({model})[/bold magenta]",
+                        border_style="magenta",
+                    )
+                )
+            live.update(
+                Panel(
+                    Markdown("".join(full_text)),
+                    title=f"[bold blue]● IDLE / READY[/bold blue] │ [bold magenta]MUSE ({model})[/bold magenta]",
+                    border_style="blue",
+                )
+            )
+        console.print()
+    except KeyboardInterrupt:
+        console.print("\n[bold red]■ STOPPED by user (Ctrl+C). Session preserved.[/bold red]\n")
+    except Exception as e:
+        console.print(f"[bold red][Error]: {e}[/bold red]\n")
+    return full_text
 
-    return "".join(full_text), actual_prompt
+
+def _stream_ansi(messages: list, model: str) -> list[str]:
+    """Stream a reply with plain ANSI output; returns collected text chunks."""
+    w = _term_width()
+    div = "─" * max(10, w - 24)
+    print(f"\n{BOLD}{C_PURPLE}╭── ■ WORKING │ MUSE ({model}) {div}{RST}")
+    full_text: list[str] = []
+    try:
+        stream = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            stream=True,
+            timeout=180.0,
+        )
+        for chunk in stream:
+            delta = chunk.choices[0].delta.content or ""
+            full_text.append(delta)
+            sys.stdout.write(delta)
+            sys.stdout.flush()
+        print()
+    except KeyboardInterrupt:
+        print(f"\n{BOLD}{C_RED}■ STOPPED by user (Ctrl+C). Session preserved.{RST}\n")
+    except Exception as e:
+        print(f"\n{C_RED}[Error]: {e}{RST}")
+    finally:
+        div_end = "─" * max(10, w - 4)
+        print(f"{BOLD}{C_BLUE}╰── ● IDLE {div_end}{RST}\n")
+    return full_text
 
 
-def _format_model_row(table, m, current_model: str, rich: "Console | None | bool" = False) -> None:
+def _format_model_row(table, m, current_model: str, rich: Any = False) -> None:
     """Print or add a single model row depending on available output mode."""
     is_active = (m.id == current_model)
     if rich:
@@ -203,7 +221,7 @@ def _fetch_model_list():
         return []
 
 
-def _print_model_header(table, rich: Console | None | bool, w: int) -> None:
+def _print_model_header(table, rich: Any, w: int) -> None:
     """Print header and table for model listing."""
     if rich:
         console.print()
@@ -225,7 +243,6 @@ def _print_model_footer(w: int) -> None:
 
 def display_models(current_model: str = ""):
     """Display available models with rich table formatting."""
-    rich = HAVE_RICH and console is not None
     w = _term_width()
 
     table = None
@@ -338,7 +355,7 @@ def _handle_help() -> None:
         print()
 
 
-def _print_save_result(ok: bool, msg: str, rich: "Console | None | bool") -> None:
+def _print_save_result(ok: bool, msg: str, rich: Any) -> None:
     """Print save result message depending on output mode."""
     if console is not None:
         if ok:
@@ -352,7 +369,7 @@ def _print_save_result(ok: bool, msg: str, rich: "Console | None | bool") -> Non
             print(f"\n{C_RED}✗ {msg}{RST}\n")
 
 
-def _print_no_code_block(rich: "Console | None | bool") -> None:
+def _print_no_code_block(rich: Any) -> None:
     """Print 'no code block found' message."""
     if console is not None:
         console.print("[bold red]✗ No code block found in last reply to save.[/bold red]\n")
@@ -531,11 +548,8 @@ def _dispatch_command(
     return None
 
 
-def interactive_chat(model: str = DEFAULT_MODEL):
-    """Run interactive terminal session with rich visuals and git support."""
-    ws = get_default_workspace()
-    remote, branch = get_git_info(ws)
-
+def _print_start_banner(ws, remote: str, branch: str, model: str) -> None:
+    """Print the session start banner (Rich panel or plain ANSI)."""
     if HAVE_RICH and console:
         info_panel = (
             f"[bold cyan]Model:[/bold cyan] {model}  │  [bold green]Tokens:[/bold green] 4B Free Web Tier\n"
@@ -550,15 +564,22 @@ def interactive_chat(model: str = DEFAULT_MODEL):
                 border_style="blue",
             )
         )
-    else:
-        w = _term_width()
-        print(f"\n{BOLD}{C_BLUE}" + "═" * w + f"{RST}")
-        print(f"  {BOLD}{C_WHITE}Muse.ai Terminal Workspace Bridge{RST} {C_GREEN}● ACTIVE{RST}")
-        print(f"  {C_GRAY}Model:{RST} {BOLD}{C_CYAN}{model}{RST}  │  {C_GRAY}Tokens:{RST} {BOLD}{C_GREEN}4B Free Tier{RST}")
-        print(f"  {C_GRAY}Workspace:{RST} {C_WHITE}{ws}{RST}")
-        print(f"  {C_GRAY}GitHub:{RST}    {C_YELLOW}{remote}{RST} {C_PURPLE}[{branch}]{RST}")
-        print(f"  {C_GRAY}Shortcuts:{RST} {C_CYAN}/git <cmd>{RST}, {C_CYAN}/open <file>{RST}, {C_CYAN}/save <file>{RST}, {C_CYAN}/help{RST}")
-        print(f"{BOLD}{C_BLUE}" + "═" * w + f"{RST}\n")
+        return
+    w = _term_width()
+    print(f"\n{BOLD}{C_BLUE}" + "═" * w + f"{RST}")
+    print(f"  {BOLD}{C_WHITE}Muse.ai Terminal Workspace Bridge{RST} {C_GREEN}● ACTIVE{RST}")
+    print(f"  {C_GRAY}Model:{RST} {BOLD}{C_CYAN}{model}{RST}  │  {C_GRAY}Tokens:{RST} {BOLD}{C_GREEN}4B Free Tier{RST}")
+    print(f"  {C_GRAY}Workspace:{RST} {C_WHITE}{ws}{RST}")
+    print(f"  {C_GRAY}GitHub:{RST}    {C_YELLOW}{remote}{RST} {C_PURPLE}[{branch}]{RST}")
+    print(f"  {C_GRAY}Shortcuts:{RST} {C_CYAN}/git <cmd>{RST}, {C_CYAN}/open <file>{RST}, {C_CYAN}/save <file>{RST}, {C_CYAN}/help{RST}")
+    print(f"{BOLD}{C_BLUE}" + "═" * w + f"{RST}\n")
+
+
+def interactive_chat(model: str = DEFAULT_MODEL):
+    """Run interactive terminal session with rich visuals and git support."""
+    ws = get_default_workspace()
+    remote, branch = get_git_info(ws)
+    _print_start_banner(ws, remote, branch, model)
 
     history: list[dict] = []
     last_reply = ""
@@ -599,7 +620,7 @@ def _fetch_account_quota(headers: dict, account_id: str) -> dict:
     return q.json().get("quota", {}) if q.status_code == 200 else {}
 
 
-def _render_status_account(t, rich: Console | None | bool, lbl: str, st: str, qd: dict) -> None:
+def _render_status_account(t, rich: Any, lbl: str, st: str, qd: dict) -> None:
     """Render a single account status row."""
     if rich:
         t.add_row(lbl, st, qd.get("plan", "-"), str(qd.get("extra_left", "-")))
@@ -614,31 +635,40 @@ def show_status():
         h = httpx.get(f"{GATEWAY_BASE}/healthz", timeout=5.0)
         acc = httpx.get(f"{GATEWAY_BASE}/admin/accounts", headers=headers, timeout=5.0).json()
         accounts = acc.get("data", acc) if isinstance(acc, dict) else acc
-        rich = HAVE_RICH and console is not None
-
         if HAVE_RICH and console is not None:
-            t = Table(title=f"Gateway Status: {GATEWAY_BASE}", border_style="blue")
-            t.add_column("Account", style="cyan")
-            t.add_column("Status", style="green")
-            t.add_column("Plan", style="yellow")
-            t.add_column("Extra Left", style="bold green")
-            for a in accounts:
-                lbl = a.get("label", "default")
-                st = a.get("status", "unknown")
-                qd = _fetch_account_quota(headers, a.get("id"))
-                _render_status_account(t, HAVE_RICH and console, lbl, st, qd)
-            console.print(t)
+            _show_status_rich(headers, accounts, h)
         else:
-            print(f"\nGateway Health: {h.status_code} ({h.text})")
-            for a in accounts:
-                qd = _fetch_account_quota(headers, a.get("id"))
-                _render_status_account(None, HAVE_RICH and console, a.get("label", "default"), a.get("status", "unknown"), qd)
-            print()
+            _show_status_plain(headers, accounts, h)
     except Exception as e:
         if HAVE_RICH and console:
             console.print(f"[bold red]Status Error: {e}[/bold red]\n")
         else:
             print(f"[Error]: {e}\n")
+
+
+def _show_status_rich(headers: dict, accounts: list, h) -> None:
+    """Render gateway status as a Rich table."""
+    t = Table(title=f"Gateway Status: {GATEWAY_BASE}", border_style="blue")
+    t.add_column("Account", style="cyan")
+    t.add_column("Status", style="green")
+    t.add_column("Plan", style="yellow")
+    t.add_column("Extra Left", style="bold green")
+    for a in accounts:
+        lbl = a.get("label", "default")
+        st = a.get("status", "unknown")
+        qd = _fetch_account_quota(headers, a.get("id"))
+        _render_status_account(t, True, lbl, st, qd)
+    console.print(t)
+
+
+def _show_status_plain(headers: dict, accounts: list, h) -> None:
+    """Render gateway status as plain text."""
+    print(f"\nGateway Health: {h.status_code} ({h.text})")
+    for a in accounts:
+        qd = _fetch_account_quota(headers, a.get("id"))
+        _render_status_account(None, False, a.get("label", "default"),
+                               a.get("status", "unknown"), qd)
+    print()
 
 
 def main():

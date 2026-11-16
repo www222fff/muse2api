@@ -233,7 +233,7 @@ _RESET_ZH = re.compile(r"(?:每(?:週|周|星期)|週|周)(?:上限|限額|限�
                        r"(?:會|会|將|将)?(?:於|于|在)\s*([^\n]*?)\s*(?:重設|重置)\b")
 _EXTRA = re.compile(r"^(?:(?:Additional|Extra)\s+tokens|(?:額外|额外)(?:的)?"
                     r"(?:符元|符記|代幣|代币|令牌|憑證|凭证|tokens))", re.IGNORECASE)
-_PCT_USED = re.compile(r"((?:\d+\.\d+|\d+))\s*%\s*(?:used|已用|已使用的)")
+_PCT_USED = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*(?:used|已用|已使用)", re.IGNORECASE)
 _USED_PCT = re.compile(r"已(?:使)?用\s*(\d+(?:\.\d+)?)\s*%")
 
 
