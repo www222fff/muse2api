@@ -38,7 +38,7 @@ def _find_absolute_paths(text: str, found: list[Path]) -> None:
 def _find_relative_paths(text: str, base: Path, found: list[Path]) -> None:
     """Look for relative paths, filenames, or module folders in text."""
     for w in re.findall(r"[a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9]+", text):
-        _try_find_file_path(w, base, found)
+        _try_find_file_path(w, base, found, text)
 
     # Also search for module directory names (e.g. gap_reversal, strategies, options_trading)
     ignore_tokens = {
@@ -51,15 +51,21 @@ def _find_relative_paths(text: str, base: Path, found: list[Path]) -> None:
             _try_find_dir_path(tok, base, found)
 
 
-def _try_find_file_path(w: str, base: Path, found: list[Path]) -> None:
+def _try_find_file_path(w: str, base: Path, found: list[Path], text: str = "") -> None:
     """Try to resolve a relative file path (and glob for deeper matches)."""
     cand = base / w
     if _try_add_path(found, cand):
         return
     if "." in w:
         matches = [m for m in base.glob(f"**/{w}") if not any(p.startswith(".") for p in m.parts)]
-        if matches and matches[0] not in found:
-            found.append(matches[0])
+        if matches:
+            if text and len(matches) > 1:
+                t_lower = text.lower()
+                matches.sort(
+                    key=lambda m: -sum(1 for part in m.parts if part.lower() in t_lower)
+                )
+            if matches[0] not in found:
+                found.append(matches[0])
 
 
 def _try_find_dir_path(tok: str, base: Path, found: list[Path]) -> None:
@@ -83,14 +89,19 @@ def _resolve_sister_imports(text: str, base: Path, found: list[Path]) -> None:
 
 def _attach_sister_modules(text: str, found: list[Path]) -> None:
     """Attach sibling modules next to any inspected Python file (when imports matter)."""
-    if not any(term in text.lower() for term in
-               ("import", "cross-file", "check", "fix", "explore", "detector")):
+    trigger_words = ("import", "cross-file", "check", "fix", "explore", "detector", "aging", "runner")
+    if not any(term in text.lower() for term in trigger_words):
         return
+    gap_sisters = (
+        "config.py", "gap_quality_filters.py", "models.py", "__init__.py",
+        "aging_detector.py", "aging_execution.py", "aging_runner.py",
+        "dynamic_ledger.py", "runner.py", "gap_entry_confirmation.py",
+    )
     for f in list(found):
         if f.is_file() and f.suffix == ".py":
             pkg_dir = f.parent
-            for sister_name in ("config.py", "gap_quality_filters.py", "models.py", "__init__.py"):
-                s_path = pkg_dir / sister_name
+            for s_name in gap_sisters:
+                s_path = pkg_dir / s_name
                 if s_path.exists() and s_path not in found:
                     found.append(s_path)
 

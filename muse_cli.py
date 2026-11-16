@@ -1,7 +1,16 @@
 #!/usr/bin/env python3
-"""Interactive and command-line CLI for muse.ai (via muse2api gateway)."""
+"""Interactive and command-line CLI for muse.ai (via muse2api gateway).
+
+Features:
+- Rich ANSI visual styling: distinct Question & Muse response containers
+- Native GitHub and Git integration via `/git <cmd>`
+- Automatic local workspace and multi-file code inspection
+- Streaming chat responses with live markdown rendering
+"""
 
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -23,243 +32,343 @@ DEFAULT_MODEL = os.environ.get("MUSE2API_DEFAULT_MODEL", "muse-spark-1.3")
 
 client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
 
+# ANSI Styling Palette
+RST = "\033[0m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+ITALIC = "\033[3m"
+UNDER = "\033[4m"
 
-def stream_chat(prompt: str, model: str = DEFAULT_MODEL, history: list | None = None) -> tuple[str, str]:
+C_CYAN = "\033[38;5;51m"
+C_BLUE = "\033[38;5;39m"
+C_GREEN = "\033[38;5;48m"
+C_YELLOW = "\033[38;5;220m"
+C_MAGENTA = "\033[38;5;207m"
+C_PURPLE = "\033[38;5;141m"
+C_RED = "\033[38;5;203m"
+C_GRAY = "\033[38;5;244m"
+C_WHITE = "\033[38;5;255m"
+
+
+def _term_width() -> int:
+    return min(shutil.get_terminal_size((80, 24)).columns, 100)
+
+
+def print_user_box(prompt: str, paths: list[Path] | None = None) -> None:
+    """Print an eye-catching, structured box for the user's prompt."""
+    w = _term_width()
+    div = "─" * max(10, w - 18)
+    print(f"\n{BOLD}{C_CYAN}┌── ❯ QUESTION {div}{RST}")
+    for line in prompt.splitlines():
+        print(f"{BOLD}{C_CYAN}│{RST} {C_WHITE}{BOLD}{line}{RST}")
+    print(f"{BOLD}{C_CYAN}└──{div}──{RST}")
+    if paths:
+        for p in paths:
+            print(f"  {C_YELLOW}↳ ⚡ [Local Workspace Context: {p}]{RST}")
+
+
+def print_assistant_header(model: str) -> None:
+    """Print styled header for Muse's response."""
+    w = _term_width()
+    div = "─" * max(10, w - 24)
+    print(f"\n{BOLD}{C_PURPLE}╭── ◆ MUSE ({model}) {div}{RST}")
+
+
+def print_assistant_footer() -> None:
+    """Print closing border for Muse's response."""
+    w = _term_width()
+    div = "─" * max(10, w - 4)
+    print(f"{BOLD}{C_PURPLE}╰{div}{RST}\n")
+
+
+def get_git_info(ws: Path) -> tuple[str, str]:
+    """Retrieve remote URL and current branch if git is initialized."""
+    try:
+        remote = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=ws, capture_output=True, text=True, timeout=2.0
+        ).stdout.strip()
+        branch = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=ws, capture_output=True, text=True, timeout=2.0
+        ).stdout.strip()
+        return remote or "No remote configured", branch or "main"
+    except Exception:
+        return "Not a git repository", ""
+
+
+def stream_chat(
+    prompt: str,
+    model: str = DEFAULT_MODEL,
+    history: list | None = None,
+) -> tuple[str, str]:
+    """Stream chat response with live output inside assistant container."""
     paths = find_local_paths(prompt)
     if paths:
         ctx = build_context_for_paths(paths)
-        for p in paths:
-            print(f"  [Accessed local: {p}]")
+        print_user_box(prompt, paths)
         actual_prompt = f"{ctx}\n\n[User Instruction]: {prompt}"
     else:
+        print_user_box(prompt)
         actual_prompt = prompt
 
     messages = list(history or [])
     messages.append({"role": "user", "content": actual_prompt})
 
+    print_assistant_header(model)
+    full_text: list[str] = []
     try:
         stream = client.chat.completions.create(
             model=model,
             messages=messages,
             stream=True,
-            timeout=180.0
+            timeout=180.0,
         )
-        full_text = []
         for chunk in stream:
             delta = chunk.choices[0].delta.content or ""
             full_text.append(delta)
             sys.stdout.write(delta)
             sys.stdout.flush()
         print()
-        return "".join(full_text), actual_prompt
     except Exception as e:
-        print(f"\n[Error]: {e}")
-        return "", actual_prompt
+        print(f"\n{C_RED}[Error]: {e}{RST}")
+    finally:
+        print_assistant_footer()
+
+    return "".join(full_text), actual_prompt
 
 
 def display_models(current_model: str = ""):
-    print("\n" + "=" * 65)
-    print("  Available Models (muse.ai Web Gateway - 4B Free Tokens)")
-    print("=" * 65)
+    """Display available models with rich formatting."""
+    w = _term_width()
+    print("\n" + f"{BOLD}{C_BLUE}" + "═" * w + f"{RST}")
+    print(f"  {BOLD}{C_WHITE}Available Models (muse.ai Web Gateway - 4B Free Tokens){RST}")
+    print(f"{BOLD}{C_BLUE}" + "═" * w + f"{RST}")
     try:
         items = client.models.list().data
     except Exception:
         items = []
 
     for m in items:
-        star = " * " if m.id == current_model else "   "
-        act = " (Active)" if m.id == current_model else ""
-        print(f"{star}{m.id:<28} {getattr(m, 'kind', 'chat')}{act}")
+        is_active = (m.id == current_model)
+        star = f"{BOLD}{C_GREEN} ➜ {RST}" if is_active else f"   "
+        act = f" {BOLD}{C_GREEN}(Active){RST}" if is_active else ""
+        kind = getattr(m, "kind", "chat")
+        print(f"{star}{C_CYAN}{m.id:<30}{RST} {C_GRAY}[{kind}]{RST}{act}")
 
-    print("-" * 65)
-    print("To switch model in chat:  /model <model_id>")
-    print("To switch model from CLI: muse -m <model_id> [prompt]\n")
+    print(f"{C_GRAY}" + "─" * w + f"{RST}")
+    print(f" {C_YELLOW}• Switch in chat:{RST}  {BOLD}/model <model_id>{RST}")
+    print(f" {C_YELLOW}• Switch from CLI:{RST} {BOLD}muse -m <model_id> [prompt]{RST}\n")
 
 
-def _handle_exit(prompt_lower: str) -> bool:
-    """Return True if prompt is an exit command."""
-    return prompt_lower in ("exit", "quit", ":q")
+def _handle_git(prompt: str) -> None:
+    """Execute git commands in the active workspace and format output."""
+    ws = get_default_workspace()
+    cmd_args = prompt.strip().split()
+    args = cmd_args[1:] if len(cmd_args) > 1 else ["status"]
+
+    print(f"\n{BOLD}{C_BLUE}┌── ⚡ GIT EXECUTION: git {' '.join(args)} ──{RST}")
+    print(f"{C_GRAY}│ Working directory: {ws}{RST}")
+    try:
+        res = subprocess.run(
+            ["git", *args],
+            cwd=ws,
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+        )
+        if res.stdout:
+            for line in res.stdout.rstrip().splitlines():
+                print(f"{C_WHITE}{line}{RST}")
+        if res.stderr:
+            for line in res.stderr.rstrip().splitlines():
+                print(f"{C_YELLOW}{line}{RST}")
+        status_color = C_GREEN if res.returncode == 0 else C_RED
+        print(f"{BOLD}{C_BLUE}└── {status_color}[Exit code: {res.returncode}]{RST}\n")
+    except Exception as e:
+        print(f"{C_RED}│ Error running git: {e}{RST}")
+        print(f"{BOLD}{C_BLUE}└────────────────────────────────────────────────{RST}\n")
 
 
 def _handle_clear() -> tuple[list, str]:
     """Clear conversation history; return new history and empty last_reply."""
     ws = get_default_workspace()
-    print(f"[Local Workspace Access Enabled - Connected to {ws}]")
-    print("[Conversation history cleared]\n")
+    print(f"\n{C_GREEN}✓ Local Workspace Access Active:{RST} {ws}")
+    print(f"{C_YELLOW}✓ Conversation history cleared.{RST}\n")
     return [], ""
 
 
-def _handle_model_view(current_model: str) -> None:
-    """Display available models."""
-    display_models(current_model=current_model)
-
-
 def _handle_model_switch(prompt: str) -> str:
-    """Switch active model from /model <id> or /m <id> command; return new model."""
-    new_m = prompt.split(maxsplit=1)[1].strip()
-    if new_m:
-        print(f"[Active model switched to: {new_m}]\n")
-    return new_m
-
-
-def _handle_status() -> None:
-    """Check gateway status."""
-    show_status()
+    """Switch active model from /model <id> command; return new model."""
+    parts = prompt.split(maxsplit=1)
+    if len(parts) > 1 and parts[1].strip():
+        new_m = parts[1].strip()
+        print(f"\n{C_GREEN}✓ Active model switched to: {BOLD}{new_m}{RST}\n")
+        return new_m
+    return DEFAULT_MODEL
 
 
 def _handle_help() -> None:
-    """Display help text."""
-    print("\nCommands:")
-    print("  /open <path>  - Open and attach local file or directory to context")
-    print("  /save <path>  - Save code block from last reply to disk")
-    print("  /model <id>   - View or switch active model")
-    print("  /cd <dir>     - Switch active workspace root directory")
-    print("  /status       - Check gateway status and token quota")
-    print("  clear         - Clear conversation history")
-    print("  exit          - Exit chat\n")
+    """Display styled command help."""
+    print(f"\n{BOLD}{C_WHITE}Muse Interactive Commands:{RST}")
+    commands = [
+        ("/git <command>", "Run git operations directly (e.g. /git status, /git diff)"),
+        ("/open <path>", "Open and attach local file or folder to conversation context"),
+        ("/save <path>", "Save code block from last reply directly to file"),
+        ("/model <id>", "View available models or switch active model"),
+        ("/cd <dir>", "Switch active workspace root directory"),
+        ("/status", "Check gateway health and token quota"),
+        ("clear", "Reset conversation context"),
+        ("exit", "Exit session"),
+    ]
+    for cmd, desc in commands:
+        print(f"  {BOLD}{C_CYAN}{cmd:<18}{RST} {C_GRAY}➜{RST} {desc}")
+    print()
 
 
-def _handle_save(last_reply: str) -> str:
-    """Save code block from last reply; return (possibly unchanged) last_reply."""
+def _handle_save(prompt: str, last_reply: str) -> None:
+    """Save code block from last reply to specified or default path."""
     code = extract_code_block(last_reply)
-    if code:
-        # Use a default target if not specified; save_code_to_file handles it
-        _, msg = save_code_to_file("output.py", code)
-        print(f"[{msg}]\n")
+    if not code:
+        print(f"\n{C_RED}✗ No code block found in last reply to save.{RST}\n")
+        return
+    parts = prompt.split(maxsplit=1)
+    target = parts[1].strip() if len(parts) > 1 else "output.py"
+    ok, msg = save_code_to_file(target, code)
+    if ok:
+        print(f"\n{C_GREEN}✓ {msg}{RST}\n")
     else:
-        print("[No code block found in last reply to save]\n")
-    return last_reply
+        print(f"\n{C_RED}✗ {msg}{RST}\n")
 
 
-def _handle_chat_message(
+def _dispatch_command(
+    prompt_lower: str,
     prompt: str,
     model: str,
     history: list,
     last_reply: str,
-) -> tuple[list, str]:
-    """Send a user message, stream the reply, and update history. Returns (history, last_reply)."""
-    print("\nMuse > ", end="", flush=True)
-    reply, actual_prompt = stream_chat(prompt, model=model, history=history)
-    if reply:
-        history.append({"role": "user", "content": actual_prompt})
-        history.append({"role": "assistant", "content": reply})
-        last_reply = reply
-    print()
-    return history, last_reply
-
-
-def _handle_open(prompt: str, model: str, history: list,
-                 last_reply: str) -> tuple[str, list, str]:
-    """Attach a local path and feed an inspection prompt to the model."""
-    target = prompt.split(maxsplit=1)[1].strip()
-    p = Path(target)
-    if not p.is_absolute():
-        p = get_default_workspace() / p
-    if p.exists():
-        print(f"[Attached local path: {p}]")
-        sub_prompt = f"Please inspect the attached local code and analyze it:\n{p}"
-        new_history, new_reply = _handle_chat_message(sub_prompt, model, history, last_reply)
-        return "continue", new_history, new_reply
-    print(f"[Path not found: {target}]\n")
-    return "continue", history, last_reply
-
-
-def _handle_cd(prompt: str, history: list, last_reply: str) -> tuple[str, list, str]:
-    """Switch the active workspace directory."""
-    new_ws = prompt.split(maxsplit=1)[1].strip()
-    new_p = Path(new_ws)
-    if new_p.is_dir():
-        os.environ["MUSE_WORKSPACE_ROOT"] = str(new_p)
-        print(f"[Active workspace switched to: {new_p}]\n")
-    else:
-        print(f"[Directory not found: {new_ws}]\n")
-    return "continue", history, last_reply
-
-
-def _dispatch_command(prompt_lower: str, prompt: str, model: str,
-                     history: list, last_reply: str) -> tuple[str, list, str] | None:
-    """Handle a CLI command. Returns None when the prompt was not a command.
-
-    Returns (action, history, last_reply) where action ∈ {"break", "continue", "chat"}.
-    """
+) -> tuple[str, list, str, str] | None:
+    """Handle CLI commands. Returns (action, history, last_reply, model) or None."""
     if prompt_lower in ("/clear", "clear", "/new", "new"):
-        clear_history, clear_reply = _handle_clear()
-        return "continue", clear_history, clear_reply
-    if _handle_exit(prompt_lower):
-        print("Goodbye!")
-        return "break", history, last_reply
+        clear_hist, clear_reply = _handle_clear()
+        return "continue", clear_hist, clear_reply, model
+    if prompt_lower in ("exit", "quit", ":q"):
+        print(f"\n{BOLD}{C_CYAN}Goodbye! Happy coding with Muse.{RST}\n")
+        return "break", history, last_reply, model
+    if prompt_lower.startswith(("/git", "git")):
+        _handle_git(prompt)
+        return "continue", history, last_reply, model
     if prompt_lower in ("/model", "/models", "model", "models", "/m"):
-        _handle_model_view(model)
-        return "continue", history, last_reply
+        display_models(current_model=model)
+        return "continue", history, last_reply, model
     if prompt_lower.startswith(("/model ", "/m ")):
-        return "continue", history, _handle_model_switch(prompt)
+        new_model = _handle_model_switch(prompt)
+        return "continue", history, last_reply, new_model
     if prompt_lower.startswith(("/save", "/write")):
-        return "continue", history, _handle_save(last_reply)
+        _handle_save(prompt, last_reply)
+        return "continue", history, last_reply, model
     if prompt_lower.startswith(("/open ", "/file ", "/folder ")):
-        return _handle_open(prompt, model, history, last_reply)
+        target = prompt.split(maxsplit=1)[1].strip()
+        p = Path(target)
+        if not p.is_absolute():
+            p = get_default_workspace() / p
+        if p.exists():
+            sub_prompt = f"Please inspect the attached local code and analyze it:\n{p}"
+            reply, actual_prompt = stream_chat(sub_prompt, model=model, history=history)
+            if reply:
+                history.append({"role": "user", "content": actual_prompt})
+                history.append({"role": "assistant", "content": reply})
+                last_reply = reply
+        else:
+            print(f"\n{C_RED}✗ Path not found: {target}{RST}\n")
+        return "continue", history, last_reply, model
     if prompt_lower.startswith(("/cd ", "/workspace ")):
-        return _handle_cd(prompt, history, last_reply)
+        new_ws = prompt.split(maxsplit=1)[1].strip()
+        new_p = Path(new_ws)
+        if new_p.is_dir():
+            os.environ["MUSE_WORKSPACE_ROOT"] = str(new_p)
+            print(f"\n{C_GREEN}✓ Active workspace switched to: {new_p}{RST}\n")
+        else:
+            print(f"\n{C_RED}✗ Directory not found: {new_ws}{RST}\n")
+        return "continue", history, last_reply, model
     if prompt_lower in ("/status", "status"):
-        _handle_status()
-        return "continue", history, last_reply
+        show_status()
+        return "continue", history, last_reply, model
     if prompt_lower in ("/help", "help", "/?"):
         _handle_help()
-        return "continue", history, last_reply
+        return "continue", history, last_reply, model
     return None
 
 
 def interactive_chat(model: str = DEFAULT_MODEL):
-    """Run an interactive chat session with the selected model."""
+    """Run interactive terminal session with rich visuals and git support."""
     ws = get_default_workspace()
-    print("=" * 65)
-    print(f"  muse.ai Interactive Chat (model: {model})")
-    print(f"  Local file access: Enabled ({ws})")
-    print("  Commands: /open <path>, /save <file>, /model <id>, /cd <dir>, exit")
-    print("=" * 65 + "\n")
-    print(f"  muse.ai Interactive Chat (model: {model})")
-    print("  Local file access: Enabled (/Volumes/Drive D/...)")
-    print("  Commands: /model, /save <file>, /file <path>, exit")
-    print("=" * 60 + "\n")
+    remote, branch = get_git_info(ws)
+    w = _term_width()
 
-    history = []
+    print(f"\n{BOLD}{C_BLUE}" + "═" * w + f"{RST}")
+    print(f"  {BOLD}{C_WHITE}Muse.ai Terminal Workspace Bridge{RST} {C_GREEN}● ACTIVE{RST}")
+    print(f"  {C_GRAY}Model:{RST} {BOLD}{C_CYAN}{model}{RST}  │  {C_GRAY}Tokens:{RST} {BOLD}{C_GREEN}4B Free Tier{RST}")
+    print(f"  {C_GRAY}Workspace:{RST} {C_WHITE}{ws}{RST}")
+    print(f"  {C_GRAY}GitHub:{RST}    {C_YELLOW}{remote}{RST} {C_PURPLE}[{branch}]{RST}")
+    print(f"  {C_GRAY}Shortcuts:{RST} {C_CYAN}/git <cmd>{RST}, {C_CYAN}/open <file>{RST}, {C_CYAN}/save <file>{RST}, {C_CYAN}/model <id>{RST}, {C_CYAN}/help{RST}")
+    print(f"{BOLD}{C_BLUE}" + "═" * w + f"{RST}\n")
+
+    history: list[dict] = []
     last_reply = ""
+    current_model = model
+
     while True:
         try:
-            prompt = input(f"[{model}] You > ").strip()
+            prompt_indicator = f"{BOLD}{C_PURPLE}[{current_model}]{RST} {BOLD}{C_GREEN}You >{RST} "
+            prompt = input(prompt_indicator).strip()
             if not prompt:
                 continue
-            prompt_lower = prompt.lower()
 
-            dispatched = _dispatch_command(prompt_lower, prompt, model, history, last_reply)
+            dispatched = _dispatch_command(
+                prompt.lower(), prompt, current_model, history, last_reply
+            )
             if dispatched is not None:
-                action, history, last_reply = dispatched
+                action, history, last_reply, current_model = dispatched
                 if action == "break":
                     break
                 continue
 
-            history, last_reply = _handle_chat_message(prompt, model, history, last_reply)
+            reply, actual_prompt = stream_chat(prompt, model=current_model, history=history)
+            if reply:
+                history.append({"role": "user", "content": actual_prompt})
+                history.append({"role": "assistant", "content": reply})
+                last_reply = reply
         except (KeyboardInterrupt, EOFError):
-            print("\nGoodbye!")
+            print(f"\n\n{BOLD}{C_CYAN}Goodbye!{RST}\n")
             break
 
 
 def show_status():
-    print(f"\nChecking gateway status at {GATEWAY_BASE}...")
+    """Display gateway status and token quota."""
+    print(f"\n{BOLD}{C_BLUE}Checking gateway status at {GATEWAY_BASE}...{RST}")
     headers = {"Authorization": f"Bearer {ADMIN_KEY}"}
     try:
         h = httpx.get(f"{GATEWAY_BASE}/healthz", timeout=5.0)
-        print(f"Gateway Health: {h.status_code} ({h.text})")
+        status_c = C_GREEN if h.status_code == 200 else C_RED
+        print(f"  Gateway Health: {status_c}{h.status_code} ({h.text}){RST}")
         acc = httpx.get(f"{GATEWAY_BASE}/admin/accounts", headers=headers, timeout=5.0).json()
         accounts = acc.get("data", acc) if isinstance(acc, dict) else acc
         for a in accounts:
-            print(f"  - Account: {a.get('label')}, Status: {a.get('status')}")
-            q = httpx.get(f"{GATEWAY_BASE}/admin/accounts/{a.get('id')}/quota", headers=headers, timeout=10.0)
+            lbl = a.get("label", "default")
+            st = a.get("status", "unknown")
+            print(f"  {C_CYAN}• Account [{lbl}]:{RST} {st}")
+            q = httpx.get(
+                f"{GATEWAY_BASE}/admin/accounts/{a.get('id')}/quota",
+                headers=headers,
+                timeout=10.0,
+            )
             if q.status_code == 200:
                 qd = q.json().get("quota", {})
-                print(f"    Plan: {qd.get('plan')}, Left: {qd.get('extra_left')}")
+                print(f"    {C_GRAY}Plan:{RST} {qd.get('plan')}  {C_GRAY}Left:{RST} {C_GREEN}{qd.get('extra_left')}{RST}")
         print()
     except Exception as e:
-        print(f"[Error]: {e}\n")
+        print(f"  {C_RED}[Error]: {e}{RST}\n")
 
 
 def main():
