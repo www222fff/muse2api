@@ -1,6 +1,6 @@
 """Live check: chat replies must preserve markdown.
 
-Two prompts per model, each run non-streaming and streaming:
+Three cases per model, each run non-streaming and streaming:
 
 1. A document with four exact headings — every heading must appear exactly
    once, *with* its ``## `` prefix.
@@ -10,8 +10,11 @@ Two prompts per model, each run non-streaming and streaming:
    ``- -`` and no ``-<U+200B>``, each item text exactly once, an even number
    of ``` fences, and a table separator row.
 
-For both prompts the concatenated stream deltas must equal the non-stream
-final text (modulo surrounding whitespace); both texts are printed on FAIL.
+The structural checks run on the streamed reply as well as the non-stream
+one (the two are independent generations, so they are never compared with
+each other). A third, deterministic case per model — a system message
+demanding exactly the word PINEAPPLE — asserts both replies strip() to
+exactly "PINEAPPLE". Both texts are printed on FAIL.
 
 Usage:
     python scripts/verify_markdown.py --key <API_KEY>
@@ -45,6 +48,11 @@ PROMPT_STRUCTURE = (
     "4. A markdown table with 2 columns (Name, Colour) and 2 rows: "
     "apple/red, pear/green."
 )
+PINEAPPLE_MESSAGES = [
+    {"role": "system",
+     "content": "Reply with exactly the single word PINEAPPLE and nothing else"},
+    {"role": "user", "content": "go"},
+]
 _TABLE_SEPARATOR = re.compile(r"\|\s*:?-{3,}:?\s*\|")
 
 
@@ -55,16 +63,15 @@ def _request(base: str, key: str, payload: dict) -> urllib.request.Request:
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
 
 
-def chat(base: str, key: str, model: str, prompt: str) -> str:
-    body = {"model": model, "messages": [{"role": "user", "content": prompt}]}
+def chat(base: str, key: str, model: str, messages: list[dict]) -> str:
+    body = {"model": model, "messages": messages}
     with urllib.request.urlopen(_request(base, key, body), timeout=600) as resp:
         payload = json.loads(resp.read())
     return payload["choices"][0]["message"]["content"]
 
 
-def chat_streamed(base: str, key: str, model: str, prompt: str) -> str:
-    body = {"model": model, "stream": True,
-            "messages": [{"role": "user", "content": prompt}]}
+def chat_streamed(base: str, key: str, model: str, messages: list[dict]) -> str:
+    body = {"model": model, "stream": True, "messages": messages}
     parts: list[str] = []
     with urllib.request.urlopen(_request(base, key, body), timeout=600) as resp:
         for raw in resp:
@@ -79,6 +86,15 @@ def chat_streamed(base: str, key: str, model: str, prompt: str) -> str:
 
 def _zero_width_count(text: str) -> int:
     return sum(text.count(char) for char in ZERO_WIDTH)
+
+
+def check_pineapple(content: str) -> list[str]:
+    problems = []
+    if content.strip() != "PINEAPPLE":
+        problems.append(f"reply is not exactly 'PINEAPPLE': {content.strip()!r}")
+    if content.count("PINEAPPLE") != 1:
+        problems.append(f"PINEAPPLE appears {content.count('PINEAPPLE')} times")
+    return problems
 
 
 def check_headings(content: str) -> list[str]:
@@ -123,15 +139,17 @@ def main() -> int:
 
     failures = 0
     for model in ("gpt-4o-mini", "claude-sonnet-4", "gpt-5"):
-        for label, prompt, check in (
-            ("headings", PROMPT_HEADINGS, check_headings),
-            ("structure", PROMPT_STRUCTURE, check_structure),
+        for label, messages, check in (
+            ("headings", [{"role": "user", "content": PROMPT_HEADINGS}], check_headings),
+            ("structure", [{"role": "user", "content": PROMPT_STRUCTURE}], check_structure),
+            ("pineapple", PINEAPPLE_MESSAGES, check_pineapple),
         ):
-            content = chat(args.base, args.key, model, prompt)
-            problems = check(content)
-            streamed = chat_streamed(args.base, args.key, model, prompt)
-            if streamed.strip() != content.strip():
-                problems.append("streamed deltas do not add up to the final text")
+            content = chat(args.base, args.key, model, messages)
+            streamed = chat_streamed(args.base, args.key, model, messages)
+            # The two replies are independent generations: each is checked on
+            # its own structure, never compared with the other.
+            problems = ([f"non-stream: {p}" for p in check(content)]
+                        + [f"stream: {p}" for p in check(streamed)])
             ok = not problems
             failures += 0 if ok else 1
             print(f"[{'PASS' if ok else 'FAIL'}] model={model} case={label}"
