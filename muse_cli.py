@@ -117,7 +117,11 @@ def stream_chat(
     if HAVE_RICH and console:
         try:
             with Live(
-                Panel(Markdown("Thinking..."), title=f"[bold magenta]◆ MUSE ({model})[/bold magenta]", border_style="magenta"),
+                Panel(
+                    Markdown("Thinking..."),
+                    title=f"[bold red]■ WORKING (Ctrl+C to Stop)[/bold red] │ [bold magenta]MUSE ({model})[/bold magenta]",
+                    border_style="magenta",
+                ),
                 refresh_per_second=8,
                 console=console,
             ) as live:
@@ -133,18 +137,27 @@ def stream_chat(
                     live.update(
                         Panel(
                             Markdown("".join(full_text)),
-                            title=f"[bold magenta]◆ MUSE ({model})[/bold magenta]",
+                            title=f"[bold red]■ WORKING[/bold red] │ [bold magenta]MUSE ({model})[/bold magenta]",
                             border_style="magenta",
                         )
                     )
+                live.update(
+                    Panel(
+                        Markdown("".join(full_text)),
+                        title=f"[bold blue]● IDLE / READY[/bold blue] │ [bold magenta]MUSE ({model})[/bold magenta]",
+                        border_style="blue",
+                    )
+                )
             console.print()
+        except KeyboardInterrupt:
+            console.print("\n[bold red]■ STOPPED by user (Ctrl+C). Session preserved.[/bold red]\n")
         except Exception as e:
             console.print(f"[bold red][Error]: {e}[/bold red]\n")
     else:
         # Fallback ANSI streaming
         w = _term_width()
         div = "─" * max(10, w - 24)
-        print(f"\n{BOLD}{C_PURPLE}╭── ◆ MUSE ({model}) {div}{RST}")
+        print(f"\n{BOLD}{C_PURPLE}╭── ■ WORKING │ MUSE ({model}) {div}{RST}")
         try:
             stream = client.chat.completions.create(
                 model=model,
@@ -158,18 +171,65 @@ def stream_chat(
                 sys.stdout.write(delta)
                 sys.stdout.flush()
             print()
+        except KeyboardInterrupt:
+            print(f"\n{BOLD}{C_RED}■ STOPPED by user (Ctrl+C). Session preserved.{RST}\n")
         except Exception as e:
             print(f"\n{C_RED}[Error]: {e}{RST}")
         finally:
             div_end = "─" * max(10, w - 4)
-            print(f"{BOLD}{C_PURPLE}╰{div_end}{RST}\n")
+            print(f"{BOLD}{C_BLUE}╰── ● IDLE {div_end}{RST}\n")
 
     return "".join(full_text), actual_prompt
 
 
+def _format_model_row(table, m, current_model: str, rich: "Console | None | bool" = False) -> None:
+    """Print or add a single model row depending on available output mode."""
+    is_active = (m.id == current_model)
+    if rich:
+        stat = "[bold green]➜ Active[/bold green]" if is_active else ""
+        table.add_row(stat, m.id, getattr(m, "kind", "chat"), "4B Free Web Tokens")
+    else:
+        star = BOLD + C_GREEN + " ➜ " + RST if is_active else "   "
+        act = BOLD + C_GREEN + "(Active)" + RST if is_active else ""
+        kind = getattr(m, "kind", "chat")
+        print(f"{star}{C_CYAN}{m.id:<30}{RST} {C_GRAY}[{kind}]{RST}{act}")
+
+
+def _fetch_model_list():
+    """Try to fetch model list from gateway; return items or empty list."""
+    try:
+        return client.models.list().data
+    except Exception:
+        return []
+
+
+def _print_model_header(table, rich: Console | None | bool, w: int) -> None:
+    """Print header and table for model listing."""
+    if rich:
+        console.print()
+        console.print(table)
+        console.print(" [yellow]• Switch in chat:[/yellow]  [bold]/model <model_id>[/bold]")
+        console.print(" [yellow]• Switch from CLI:[/yellow] [bold]muse -m <model_id> [prompt][/bold]\n")
+    else:
+        print(f"{BOLD}{C_BLUE}" + "═" * w + f"{RST}")
+        print(f"  {BOLD}{C_WHITE}Available Models (muse.ai Web Gateway - 4B Free Tokens){RST}")
+        print(f"{BOLD}{C_BLUE}" + "═" * w + f"{RST}")
+
+
+def _print_model_footer(w: int) -> None:
+    """Print footer for model listing."""
+    print(f"{C_GRAY}" + "─" * w + f"{RST}")
+    print(f" {C_YELLOW}• Switch in chat:{RST}  {BOLD}/model <model_id>{RST}")
+    print(f" {C_YELLOW}• Switch from CLI:{RST} {BOLD}muse -m <model_id> [prompt]\\n")
+
+
 def display_models(current_model: str = ""):
     """Display available models with rich table formatting."""
-    if HAVE_RICH and console:
+    rich = HAVE_RICH and console is not None
+    w = _term_width()
+
+    table = None
+    if HAVE_RICH and console is not None:
         table = Table(
             title="Available Models (muse.ai Web Gateway - 4B Free Tokens)",
             border_style="blue",
@@ -180,40 +240,15 @@ def display_models(current_model: str = ""):
         table.add_column("Type", style="dim")
         table.add_column("Access Tier", style="green")
 
-        try:
-            items = client.models.list().data
-        except Exception:
-            items = []
+    items = _fetch_model_list()
+    for m in items:
+        _format_model_row(table, m, current_model, HAVE_RICH and console)
 
-        for m in items:
-            is_active = (m.id == current_model)
-            stat = "[bold green]➜ Active[/bold green]" if is_active else ""
-            table.add_row(stat, m.id, getattr(m, "kind", "chat"), "4B Free Web Tokens")
-
-        console.print()
-        console.print(table)
-        console.print(" [yellow]• Switch in chat:[/yellow]  [bold]/model <model_id>[/bold]")
-        console.print(" [yellow]• Switch from CLI:[/yellow] [bold]muse -m <model_id> [prompt][/bold]\n")
+    if HAVE_RICH and console is not None:
+        _print_model_header(table, HAVE_RICH and console, w)
     else:
-        w = _term_width()
-        print("\n" + f"{BOLD}{C_BLUE}" + "═" * w + f"{RST}")
-        print(f"  {BOLD}{C_WHITE}Available Models (muse.ai Web Gateway - 4B Free Tokens){RST}")
-        print(f"{BOLD}{C_BLUE}" + "═" * w + f"{RST}")
-        try:
-            items = client.models.list().data
-        except Exception:
-            items = []
-
-        for m in items:
-            is_active = (m.id == current_model)
-            star = f"{BOLD}{C_GREEN} ➜ {RST}" if is_active else f"   "
-            act = f" {BOLD}{C_GREEN}(Active){RST}" if is_active else ""
-            kind = getattr(m, "kind", "chat")
-            print(f"{star}{C_CYAN}{m.id:<30}{RST} {C_GRAY}[{kind}]{RST}{act}")
-
-        print(f"{C_GRAY}" + "─" * w + f"{RST}")
-        print(f" {C_YELLOW}• Switch in chat:{RST}  {BOLD}/model <model_id>{RST}")
-        print(f" {C_YELLOW}• Switch from CLI:{RST} {BOLD}muse -m <model_id> [prompt]{RST}\n")
+        _print_model_header(None, HAVE_RICH and console, w)
+        _print_model_footer(w)
 
 
 def _handle_git(prompt: str) -> None:
@@ -278,13 +313,14 @@ def _handle_model_switch(prompt: str) -> str:
 
 def _handle_help() -> None:
     """Display styled command help."""
+    STATUS_CMD = "/status"
     commands = [
         ("/git <command>", "Run git operations directly (e.g. /git status, /git diff)"),
         ("/open <path>", "Open and attach local file or folder to conversation context"),
         ("/save <path>", "Save code block from last reply directly to file"),
         ("/model <id>", "View available models or switch active model"),
         ("/cd <dir>", "Switch active workspace root directory"),
-        ("/status", "Check gateway health and token quota"),
+        (STATUS_CMD, "Check gateway health and token quota"),
         ("clear", "Reset conversation context"),
         ("exit", "Exit session"),
     ]
@@ -302,59 +338,93 @@ def _handle_help() -> None:
         print()
 
 
-def _handle_save(prompt: str, last_reply: str) -> None:
-    """Save code block from last reply to specified or default path."""
-    code = extract_code_block(last_reply)
-    if not code:
-        if HAVE_RICH and console:
-            console.print("[bold red]✗ No code block found in last reply to save.[/bold red]\n")
-        else:
-            print(f"\n{C_RED}✗ No code block found in last reply to save.{RST}\n")
-        return
-    parts = prompt.split(maxsplit=1)
-    target = parts[1].strip() if len(parts) > 1 else "output.py"
-    ok, msg = save_code_to_file(target, code)
-    if ok:
-        if HAVE_RICH and console:
+def _print_save_result(ok: bool, msg: str, rich: "Console | None | bool") -> None:
+    """Print save result message depending on output mode."""
+    if console is not None:
+        if ok:
             console.print(f"[bold green]✓ {msg}[/bold green]\n")
         else:
-            print(f"\n{C_GREEN}✓ {msg}{RST}\n")
-    else:
-        if HAVE_RICH and console:
             console.print(f"[bold red]✗ {msg}[/bold red]\n")
+    else:
+        if ok:
+            print(f"\n{C_GREEN}✓ {msg}{RST}\n")
         else:
             print(f"\n{C_RED}✗ {msg}{RST}\n")
 
 
-def _dispatch_command(
-    prompt_lower: str,
-    prompt: str,
-    model: str,
-    history: list,
-    last_reply: str,
-) -> tuple[str, list, str, str] | None:
-    """Handle CLI commands. Returns (action, history, last_reply, model) or None."""
+def _print_no_code_block(rich: "Console | None | bool") -> None:
+    """Print 'no code block found' message."""
+    if console is not None:
+        console.print("[bold red]✗ No code block found in last reply to save.[/bold red]\n")
+    else:
+        print(f"\n{C_RED}✗ No code block found in last reply to save.{RST}\n")
+
+
+def _handle_save(prompt: str, last_reply: str) -> None:
+    """Save code block from last reply to specified or default path."""
+    code = extract_code_block(last_reply)
+    if not code:
+        _print_no_code_block(HAVE_RICH and console)
+        return
+    parts = prompt.split(maxsplit=1)
+    target = parts[1].strip() if len(parts) > 1 else "output.py"
+    _, msg = save_code_to_file(target, code)
+    _print_save_result(bool(msg), msg, HAVE_RICH and console)
+
+
+def _handle_clear_cmd(prompt_lower, prompt, model, history, last_reply):
+    """Handle /clear, clear, /new, new commands."""
     if prompt_lower in ("/clear", "clear", "/new", "new"):
         clear_hist, clear_reply = _handle_clear()
         return "continue", clear_hist, clear_reply, model
+    return None
+
+
+def _handle_exit_cmd(prompt_lower, prompt, model, history, last_reply):
+    """Handle exit, quit, :q commands."""
     if prompt_lower in ("exit", "quit", ":q"):
         if HAVE_RICH and console:
             console.print("[bold cyan]Goodbye! Happy coding with Muse.[/bold cyan]\n")
         else:
             print(f"\n{BOLD}{C_CYAN}Goodbye! Happy coding with Muse.{RST}\n")
         return "break", history, last_reply, model
+    return None
+
+
+def _handle_git_cmd(prompt_lower, prompt, model, history, last_reply):
+    """Handle /git, git commands."""
     if prompt_lower.startswith(("/git", "git")):
         _handle_git(prompt)
         return "continue", history, last_reply, model
+    return None
+
+
+def _handle_model_view_cmd(prompt_lower, prompt, model, history, last_reply):
+    """Handle /model, /models, model, models, /m commands."""
     if prompt_lower in ("/model", "/models", "model", "models", "/m"):
         display_models(current_model=model)
         return "continue", history, last_reply, model
+    return None
+
+
+def _handle_model_switch_cmd(prompt_lower, prompt, model, history, last_reply):
+    """Handle /model <id>, /m <id> commands."""
     if prompt_lower.startswith(("/model ", "/m ")):
         new_model = _handle_model_switch(prompt)
         return "continue", history, last_reply, new_model
+    return None
+
+
+def _handle_save_cmd(prompt_lower, prompt, model, history, last_reply):
+    """Handle /save, /write commands."""
     if prompt_lower.startswith(("/save", "/write")):
         _handle_save(prompt, last_reply)
         return "continue", history, last_reply, model
+    return None
+
+
+def _handle_open_cmd(prompt_lower, prompt, model, history, last_reply):
+    """Handle /open, /file, /folder commands."""
     if prompt_lower.startswith(("/open ", "/file ", "/folder ")):
         target = prompt.split(maxsplit=1)[1].strip()
         p = Path(target)
@@ -373,6 +443,11 @@ def _dispatch_command(
             else:
                 print(f"\n{C_RED}✗ Path not found: {target}{RST}\n")
         return "continue", history, last_reply, model
+    return None
+
+
+def _handle_cd_cmd(prompt_lower, prompt, model, history, last_reply):
+    """Handle /cd, /workspace commands."""
     if prompt_lower.startswith(("/cd ", "/workspace ")):
         new_ws = prompt.split(maxsplit=1)[1].strip()
         new_p = Path(new_ws)
@@ -388,12 +463,71 @@ def _dispatch_command(
             else:
                 print(f"\n{C_RED}✗ Directory not found: {new_ws}{RST}\n")
         return "continue", history, last_reply, model
+    return None
+
+
+def _handle_status_cmd(prompt_lower, prompt, model, history, last_reply):
+    """Handle /status, status commands."""
     if prompt_lower in ("/status", "status"):
         show_status()
         return "continue", history, last_reply, model
+    return None
+
+
+def _handle_restart_cmd(prompt_lower, prompt, model, history, last_reply):
+    """Handle /restart, restart, /reset, reset commands to refresh gateway and connection."""
+    if prompt_lower in ("/restart", "restart", "/reset", "reset", "/renew"):
+        if HAVE_RICH and console:
+            console.print("\n[bold yellow]↻ Refreshing Muse gateway connection and browser tabs...[/bold yellow]")
+        else:
+            print("\n↻ Refreshing Muse gateway connection and browser tabs...")
+        try:
+            httpx.post(f"{GATEWAY_BASE}/admin/accounts/renew_all", headers={"Authorization": f"Bearer {ADMIN_KEY}"}, timeout=5.0)
+        except Exception:
+            pass
+        if HAVE_RICH and console:
+            console.print("[bold green]✓ Gateway tabs renewed. State: [bold blue]● IDLE / READY[/bold blue][/bold green]\n")
+        else:
+            print("✓ Gateway tabs renewed. State: ● IDLE / READY\n")
+        return "continue", history, last_reply, model
+    return None
+
+
+def _handle_help_cmd(prompt_lower, prompt, model, history, last_reply):
+    """Handle /help, help, /? commands."""
     if prompt_lower in ("/help", "help", "/?"):
         _handle_help()
         return "continue", history, last_reply, model
+    return None
+
+
+_COMMAND_HANDLERS = [
+    _handle_clear_cmd,
+    _handle_exit_cmd,
+    _handle_git_cmd,
+    _handle_model_view_cmd,
+    _handle_model_switch_cmd,
+    _handle_save_cmd,
+    _handle_open_cmd,
+    _handle_cd_cmd,
+    _handle_status_cmd,
+    _handle_restart_cmd,
+    _handle_help_cmd,
+]
+
+
+def _dispatch_command(
+    prompt_lower: str,
+    prompt: str,
+    model: str,
+    history: list,
+    last_reply: str,
+) -> tuple[str, list, str, str] | None:
+    """Handle CLI commands. Returns (action, history, last_reply, model) or None."""
+    for handler in _COMMAND_HANDLERS:
+        result = handler(prompt_lower, prompt, model, history, last_reply)
+        if result is not None:
+            return result
     return None
 
 
@@ -432,7 +566,7 @@ def interactive_chat(model: str = DEFAULT_MODEL):
 
     while True:
         try:
-            prompt_indicator = f"[{current_model}] You > "
+            prompt_indicator = f"\033[1;34m●\033[0m [{current_model}] You > "
             prompt = input(prompt_indicator).strip()
             if not prompt:
                 continue
@@ -451,9 +585,26 @@ def interactive_chat(model: str = DEFAULT_MODEL):
                 history.append({"role": "user", "content": actual_prompt})
                 history.append({"role": "assistant", "content": reply})
                 last_reply = reply
-        except (KeyboardInterrupt, EOFError):
+        except KeyboardInterrupt:
+            print("\n(Type 'exit' to quit chat session)\n")
+            continue
+        except EOFError:
             print("\nGoodbye!\n")
             break
+
+
+def _fetch_account_quota(headers: dict, account_id: str) -> dict:
+    """Fetch quota for a single account."""
+    q = httpx.get(f"{GATEWAY_BASE}/admin/accounts/{account_id}/quota", headers=headers, timeout=10.0)
+    return q.json().get("quota", {}) if q.status_code == 200 else {}
+
+
+def _render_status_account(t, rich: Console | None | bool, lbl: str, st: str, qd: dict) -> None:
+    """Render a single account status row."""
+    if rich:
+        t.add_row(lbl, st, qd.get("plan", "-"), str(qd.get("extra_left", "-")))
+    else:
+        print(f"  Account: {lbl}, Status: {st}")
 
 
 def show_status():
@@ -463,8 +614,9 @@ def show_status():
         h = httpx.get(f"{GATEWAY_BASE}/healthz", timeout=5.0)
         acc = httpx.get(f"{GATEWAY_BASE}/admin/accounts", headers=headers, timeout=5.0).json()
         accounts = acc.get("data", acc) if isinstance(acc, dict) else acc
+        rich = HAVE_RICH and console is not None
 
-        if HAVE_RICH and console:
+        if HAVE_RICH and console is not None:
             t = Table(title=f"Gateway Status: {GATEWAY_BASE}", border_style="blue")
             t.add_column("Account", style="cyan")
             t.add_column("Status", style="green")
@@ -473,14 +625,14 @@ def show_status():
             for a in accounts:
                 lbl = a.get("label", "default")
                 st = a.get("status", "unknown")
-                q = httpx.get(f"{GATEWAY_BASE}/admin/accounts/{a.get('id')}/quota", headers=headers, timeout=10.0)
-                qd = q.json().get("quota", {}) if q.status_code == 200 else {}
-                t.add_row(lbl, st, qd.get("plan", "-"), str(qd.get("extra_left", "-")))
+                qd = _fetch_account_quota(headers, a.get("id"))
+                _render_status_account(t, HAVE_RICH and console, lbl, st, qd)
             console.print(t)
         else:
             print(f"\nGateway Health: {h.status_code} ({h.text})")
             for a in accounts:
-                print(f"  Account: {a.get('label')}, Status: {a.get('status')}")
+                qd = _fetch_account_quota(headers, a.get("id"))
+                _render_status_account(None, HAVE_RICH and console, a.get("label", "default"), a.get("status", "unknown"), qd)
             print()
     except Exception as e:
         if HAVE_RICH and console:
