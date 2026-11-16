@@ -61,6 +61,11 @@ class Gateway:
                         raise
                     log.warning("chat failed on %s (%s), failing over", lease.account.id, exc)
 
+    async def chat_complete(self, req: ChatRequest) -> str:
+        """Non-streaming chat: the driver's final reply text, with failover."""
+        return await self._run(lambda acc: self.driver.chat_complete(acc, req),
+                               hint=req.conversation_hint)
+
     async def _run(self, fn: Callable[[Account], Awaitable[T]], hint: str | None = None,
                    kind: str | None = None) -> T:
         tried: list[str] = []

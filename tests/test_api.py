@@ -200,7 +200,14 @@ def _capture_chat_requests(client, monkeypatch) -> list:
         async for d in original(req):
             yield d
 
+    original_complete = gateway.chat_complete
+
+    async def spy_complete(req):
+        seen.append(req)
+        return await original_complete(req)
+
     monkeypatch.setattr(gateway, "chat_stream", spy)
+    monkeypatch.setattr(gateway, "chat_complete", spy_complete)
     return seen
 
 
@@ -240,8 +247,8 @@ def test_responses_items_and_instructions(client, auth, monkeypatch):
                   {"type": "message", "role": "assistant", "content": "noon"},
                   {"role": "user", "content": "and date"}]})
     assert r.status_code == 200
-    # instructions folded in as a System block, turns preserved.
-    assert "[System]\nbe terse" in seen[0].prompt
+    # instructions folded in as the leading system-instructions block, turns preserved.
+    assert seen[0].prompt.startswith("<system_instructions>\nbe terse\n</system_instructions>")
     assert seen[0].turns[0] == ("system", "be terse")
 
 
