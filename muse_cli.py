@@ -21,6 +21,7 @@ from openai import OpenAI
 from workspace_helper import (
     build_context_for_paths,
     extract_code_block,
+    extract_file_edits,
     find_local_paths,
     get_default_workspace,
     save_code_to_file,
@@ -273,7 +274,55 @@ def stream_chat(
     else:
         full_text = _stream_ansi(messages, model)
 
-    return "".join(full_text), actual_prompt
+    reply_str = "".join(full_text)
+    if reply_str:
+        _auto_apply_reply_edits(reply_str, prompt, paths)
+
+    return reply_str, actual_prompt
+
+
+def _auto_apply_reply_edits(
+    reply: str,
+    prompt: str,
+    paths: list[Path],
+) -> list[str]:
+    """Automatically detect and save code edits from assistant reply to disk."""
+    edits = extract_file_edits(reply, prompt, paths)
+    if not edits:
+        return []
+
+    saved_paths: list[str] = []
+    for target_path, code in edits:
+        ok, msg = save_code_to_file(target_path, code)
+        if ok:
+            saved_paths.append(target_path)
+            num_lines = len(code.splitlines())
+            if HAVE_RICH and console:
+                console.print(
+                    Panel(
+                        f"[bold green]✓ Agent Changes Applied to Disk:[/bold green]\n"
+                        f"  [cyan]{target_path}[/cyan] ({num_lines} lines)\n\n"
+                        f"[dim]↳ Live on disk. Visible in VS Code "
+                        f"[bold]Source Control (Changes)[/bold] tab.[/dim]",
+                        title="[bold green]● FILE SYSTEM WRITE SUCCESS[/bold green]",
+                        border_style="green",
+                    )
+                )
+            else:
+                print(
+                    f"\n{BOLD}{C_GREEN}✓ Agent Changes Applied to Disk:{RST} "
+                    f"{C_CYAN}{target_path}{RST} ({num_lines} lines)"
+                )
+                print(
+                    f"  {C_GRAY}↳ Live on disk. Visible in VS Code Source Control "
+                    f"(Changes) tab.{RST}\n"
+                )
+        else:
+            if HAVE_RICH and console:
+                console.print(f"[bold red]✗ Failed to write {target_path}: {msg}[/bold red]")
+            else:
+                print(f"{C_RED}✗ Failed to write {target_path}: {msg}{RST}")
+    return saved_paths
 
 
 def _stream_rich(messages: list, model: str) -> list[str]:
@@ -559,12 +608,12 @@ def _handle_save(prompt: str, last_reply: str) -> None:
     """Save code block from last reply to specified or default path."""
     code = extract_code_block(last_reply)
     if not code:
-        _print_no_code_block(HAVE_RICH and console)
+        _print_no_code_block()
         return
     parts = prompt.split(maxsplit=1)
     target = parts[1].strip() if len(parts) > 1 else "output.py"
     _, msg = save_code_to_file(target, code)
-    _print_save_result(bool(msg), msg, HAVE_RICH and console)
+    _print_save_result(bool(msg), msg)
 
 
 def _handle_clear_cmd(prompt_lower, prompt, model, history, last_reply):

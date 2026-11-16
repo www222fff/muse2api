@@ -349,12 +349,24 @@ def build_context_for_paths(
     """Build a structured context block from local files or directories."""
     base = get_default_workspace()
     blocks = [
-        "[Local Workspace Access Enabled - Connected to macOS Machine]",
+        "[Autonomous Agent Mode Active — Direct Workspace File Edit Access]",
         f"Connected Workspace Root: {base}",
-        "Local file and repository access is active. You have full visibility into the local workspace.",
-        "When providing code edits, output the full code in a ```python ... ``` code block.",
-        "The user CLI supports saving your code directly to disk via `/save <filepath>`.",
-        "DO NOT say you lack access or request file uploads when files or git info are provided below.",
+        "You have direct write and edit access to the local codebase through the terminal bridge.",
+        "When asked to fix bugs, refactor, implement features, or edit files:",
+        "1. Always specify the relative target file path in your code block header or before it:",
+        "   ```python:path/to/file.py",
+        "   <full corrected file content or replacement>",
+        "   ```",
+        "   Or use: `### File: path/to/file.py` immediately followed by the code block.",
+        "2. The bridge automatically writes your code directly to disk upon completion.",
+        "   The user will immediately see the changes in their Git Source Control / Changes tab.",
+        "3. NEVER say 'I cannot write directly to your Mac' or tell the user to manually run '/save'.",
+        "   Confirm that the file has been edited on disk for the user to review in Source Control.",
+        "4. CRITICAL REPOSITORY CODING RULES:",
+        "   - STRICTLY PROHIBITED: `from __future__ import annotations` (deprecated in Python 3.14+).",
+        "   - Hard cap: <= 250 lines per .py file.",
+        "   - Zero floating-point equality (== or != against floats). Use thresholds or math.isclose.",
+        "   - Flake8 compliance: max line length 100 characters.",
     ]
     if prompt:
         git_ctx = get_git_context(base, prompt)
@@ -394,23 +406,109 @@ def _append_small_file(f_p: Path, blocks: list[str], seen_files: set[Path]) -> N
 
 def extract_code_block(text: str) -> str | None:
     """Extract code from python markdown block in text."""
-    m = re.search(r"```(?:python)?\n(.*?)```", text, re.DOTALL)
+    m = re.search(r"```(?:python|py)?[^\n]*\n(.*?)```", text, re.DOTALL)
     return m.group(1).strip() if m else None
 
 
+def extract_file_edits(
+    reply: str,
+    prompt: str = "",
+    paths: list[Path] | None = None,
+) -> list[tuple[str, str]]:
+    """Extract (file_path, code) pairs from assistant reply."""
+    edits: list[tuple[str, str]] = []
+    seen_targets: set[str] = set()
+
+    # Pattern 1: ```python:path/to/file.ext or ```python path/to/file.ext
+    p1 = re.compile(
+        r"```(?:python|py)?[:\s]+([a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9_]+)[^\n]*\n(.*?)```",
+        re.DOTALL,
+    )
+    for m in p1.finditer(reply):
+        tgt = m.group(1).strip()
+        code = m.group(2).strip()
+        if tgt and code and tgt not in seen_targets:
+            seen_targets.add(tgt)
+            edits.append((tgt, code))
+
+    # Pattern 2: ### File: path/to/file.ext or File: path/to/file.ext before code block
+    p2 = re.compile(
+        r"(?:###?\s*File:\s*|File:\s*|\*\*File\*\*:\s*)(`?[a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9_]+`?)"
+        r"[^\n]*\n+```(?:[a-zA-Z0-9_\-]+)?\n(.*?)```",
+        re.DOTALL,
+    )
+    for m in p2.finditer(reply):
+        tgt = m.group(1).strip().strip("`*")
+        code = m.group(2).strip()
+        if tgt and code and tgt not in seen_targets:
+            seen_targets.add(tgt)
+            edits.append((tgt, code))
+
+    # Pattern 3: Save with: /save path/to/file.ext or /save path/to/file.ext in text
+    p3 = re.compile(r"(?:Save with:\s*)?/save\s+(`?[a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9_]+`?)")
+    save_match = p3.search(reply)
+    if save_match:
+        tgt = save_match.group(1).strip().strip("`*")
+        code = extract_code_block(reply)
+        if tgt and code and tgt not in seen_targets:
+            seen_targets.add(tgt)
+            edits.append((tgt, code))
+
+    # Pattern 4: Fallback if single target file was requested in prompt or passed in paths
+    if not edits:
+        code = extract_code_block(reply)
+        if code and len(code.splitlines()) >= 2:
+            target_file: str | None = None
+            py_matches = re.findall(
+                r"([a-zA-Z0-9_\-./\\]+\.(?:py|json|toml|yaml|md))",
+                f"{prompt} {reply}",
+            )
+            valid_py = [
+                f for f in py_matches
+                if not f.startswith("python") and ("/" in f or f.endswith(".py"))
+            ]
+            if valid_py:
+                target_file = valid_py[0]
+            elif paths:
+                file_paths = [p for p in paths if p.is_file()]
+                if len(file_paths) == 1:
+                    target_file = str(file_paths[0])
+            if target_file and target_file not in seen_targets:
+                intent_keywords = (
+                    "fix", "edit", "save", "update", "patch", "refactor",
+                    "rewrite", "correct", "replace", "add", "implement", "todo",
+                )
+                if any(w in prompt.lower() for w in intent_keywords):
+                    edits.append((target_file, code))
+
+    return edits
+
+
 def save_code_to_file(path_str: str, code: str) -> tuple[bool, str]:
-    """Write code to file and verify with py_compile."""
+    """Write code to file, strip prohibited annotations, and verify with py_compile."""
     try:
         p = Path(path_str.strip())
         if not p.is_absolute():
             p = get_default_workspace() / p
+
+        if p.suffix == ".py":
+            # Repository rule: NO from __future__ import annotations
+            code = re.sub(
+                r"^[ \t]*from\s+__future__\s+import\s+annotations[^\n]*\n?",
+                "",
+                code,
+                flags=re.MULTILINE,
+            )
+
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(code, encoding="utf-8")
         if p.suffix == ".py":
-            res = subprocess.run(["python", "-m", "py_compile", str(p)],
-                                 capture_output=True, text=True, check=False)
+            res = subprocess.run(
+                ["python", "-m", "py_compile", str(p)],
+                capture_output=True, text=True, check=False,
+            )
             if res.returncode != 0:
-                return False, f"Syntax error: {res.stderr}"
+                return False, f"Syntax error in {p.name}: {res.stderr}"
         return True, f"Saved successfully to {p}"
     except Exception as e:
         return False, str(e)
