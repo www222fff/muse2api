@@ -360,7 +360,7 @@ class BrowserDriver(MuseDriver):
         if url:
             tab.thread_url = url
         tab.hint = req.conversation_hint
-        tab.turns = list(req.turns)
+        tab.turns = req.turns
         tab.image_count = len(req.images)
         account.meta["hot_page"] = {
             "hint": req.conversation_hint or "",
@@ -653,6 +653,33 @@ class BrowserDriver(MuseDriver):
         await self._checkin(tab)
         self.prewarm(account)
 
+    async def _poll_stream(self, tab: _Tab, req: ChatRequest, base_count: int,
+                           base_text: str, started: float, emitted: str,
+                           last, stable: int, got_first: bool) -> tuple[str, str, int, bool, bool, str | None]:
+        """Poll the tab once; returns (emitted, last, stable, got_first, finished, delta)."""
+        if req.cancel and req.cancel.is_set():
+            return emitted, last, stable, got_first, True, None
+        elapsed = time.monotonic() - started
+        self._enforce_stream_deadlines(req, elapsed, got_first)
+        await asyncio.sleep(POLL_INTERVAL)
+        st = await self._state(tab)
+        if st.get("approval"):
+            await self._deny_approvals(tab)
+            return emitted, last, stable, got_first, False, None
+        text = st.get("lastText", "")
+        is_new = st.get("agentCount", 0) > base_count or (text and text != base_text)
+        if not is_new or not text:
+            self._raise_if_stalled(elapsed, st)
+            return emitted, last, stable, got_first, False, None
+        if text != last:
+            delta = text[len(emitted):] if text.startswith(emitted) else text
+            emitted = text
+            return emitted, text, 0, True, False, delta
+        stable += 1
+        if self._stream_settled(st, stable):
+            return emitted, last, stable, True, True, None
+        return emitted, last, stable, True, False, None
+
     async def chat_stream(self, account: Account, req: ChatRequest) -> AsyncIterator[str]:
         tab, base = await self._begin_chat(account, req)
         base_count, base_text = base.get("agentCount", 0), base.get("lastText", "")
@@ -661,32 +688,12 @@ class BrowserDriver(MuseDriver):
         finished = False
         try:
             while True:
-                if req.cancel and req.cancel.is_set():
+                emitted, last, stable, got_first, finished, delta = await self._poll_stream(
+                    tab, req, base_count, base_text, started, emitted, last, stable, got_first)
+                if finished:
                     return
-                elapsed = time.monotonic() - started
-                self._enforce_stream_deadlines(req, elapsed, got_first)
-                await asyncio.sleep(POLL_INTERVAL)
-                st = await self._state(tab)
-                if st.get("approval"):
-                    await self._deny_approvals(tab)
-                    continue
-                text = st.get("lastText", "")
-                is_new = st.get("agentCount", 0) > base_count or (text and text != base_text)
-                if not is_new or not text:
-                    self._raise_if_stalled(elapsed, st)
-                    continue
-                got_first = True
-                if text != last:
-                    delta = text[len(emitted):] if text.startswith(emitted) else text
-                    if delta:
-                        emitted = text
-                        yield delta
-                    last, stable = text, 0
-                else:
-                    stable += 1
-                    if self._stream_settled(st, stable):
-                        finished = True
-                        return
+                if delta:
+                    yield delta
         except CDPError as exc:
             await self._close_tab(tab)
             raise UpstreamError(f"browser error: {exc}") from exc
@@ -823,6 +830,31 @@ class BrowserDriver(MuseDriver):
                  kind, grace, probe.get("links", []), probe.get("html", ""))
         return "refuse", text
 
+    async def _settle_text_only(self, tab: _Tab, st: dict, kind: str,
+                                ctx: dict) -> tuple[str, dict | None]:
+        """Wait out text-only replies; ask once, then probe links or refuse."""
+        text = st.get("lastText", "")
+        if not (st.get("agentCount", 0) > ctx["base_count"] and text
+                and not st.get("generating")):
+            ctx["text_done_at"] = None
+            return "continue", None
+        now = time.monotonic()
+        if ctx["text_done_at"] is None:
+            ctx["text_done_at"] = now
+            return "continue", None
+        if now - ctx["text_done_at"] < ctx["grace"]:
+            return "continue", None
+        action, payload = await self._text_only_action(
+            tab, kind, text, ctx["grace"], ctx["denied"], ctx["asked"])
+        if action == "ask":
+            ctx["asked"] = True
+            ctx["text_done_at"] = None
+            ctx["base_count"] = st.get("agentCount", 0)
+            return "continue", None
+        if action == "link":
+            return "link", {"src": payload, "kind": kind}
+        raise UpstreamRefused(f"upstream replied with text only: {text[:200]}")
+
     async def _step_media(self, tab: _Tab, st: dict, kind: str,
                           ctx: dict) -> tuple[str, dict | None]:
         """Advance one media-wait iteration; returns (action, payload)."""
@@ -837,28 +869,7 @@ class BrowserDriver(MuseDriver):
         if any(kind in (a.get("tid") or "") for a in new_atts):
             ctx["text_done_at"] = None
             return "continue", None
-        # No attachment yet. The reply may be genuinely text-only (a refusal),
-        # or the attachment may simply lag the completion sentence.
-        text = st.get("lastText", "")
-        if st.get("agentCount", 0) > ctx["base_count"] and text and not st.get("generating"):
-            now = time.monotonic()
-            if ctx["text_done_at"] is None:
-                ctx["text_done_at"] = now
-                return "continue", None
-            if now - ctx["text_done_at"] >= ctx["grace"]:
-                action, payload = await self._text_only_action(
-                    tab, kind, text, ctx["grace"], ctx["denied"], ctx["asked"])
-                if action == "ask":
-                    ctx["asked"] = True
-                    ctx["text_done_at"] = None
-                    ctx["base_count"] = st.get("agentCount", 0)
-                    return "continue", None
-                if action == "link":
-                    return "link", {"src": payload, "kind": kind}
-                raise UpstreamRefused(f"upstream replied with text only: {text[:200]}")
-        else:
-            ctx["text_done_at"] = None
-        return "continue", None
+        return await self._settle_text_only(tab, st, kind, ctx)
 
     async def _wait_media(self, tab: _Tab, base: dict, kind: str, timeout: float,
                           on_progress, cancel: asyncio.Event | None) -> dict:

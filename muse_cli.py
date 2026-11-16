@@ -3,6 +3,7 @@
 
 import os
 import sys
+from pathlib import Path
 
 import httpx
 from openai import OpenAI
@@ -10,6 +11,7 @@ from workspace_helper import (
     build_context_for_paths,
     extract_code_block,
     find_local_paths,
+    get_default_workspace,
     save_code_to_file,
 )
 
@@ -22,7 +24,7 @@ DEFAULT_MODEL = os.environ.get("MUSE2API_DEFAULT_MODEL", "muse-spark-1.3")
 client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
 
 
-def stream_chat(prompt: str, model: str = DEFAULT_MODEL, history: list | None = None) -> str:
+def stream_chat(prompt: str, model: str = DEFAULT_MODEL, history: list | None = None) -> tuple[str, str]:
     paths = find_local_paths(prompt)
     if paths:
         ctx = build_context_for_paths(paths)
@@ -49,10 +51,10 @@ def stream_chat(prompt: str, model: str = DEFAULT_MODEL, history: list | None = 
             sys.stdout.write(delta)
             sys.stdout.flush()
         print()
-        return "".join(full_text)
+        return "".join(full_text), actual_prompt
     except Exception as e:
         print(f"\n[Error]: {e}")
-        return ""
+        return "", actual_prompt
 
 
 def display_models(current_model: str = ""):
@@ -81,6 +83,8 @@ def _handle_exit(prompt_lower: str) -> bool:
 
 def _handle_clear() -> tuple[list, str]:
     """Clear conversation history; return new history and empty last_reply."""
+    ws = get_default_workspace()
+    print(f"[Local Workspace Access Enabled - Connected to {ws}]")
     print("[Conversation history cleared]\n")
     return [], ""
 
@@ -106,8 +110,10 @@ def _handle_status() -> None:
 def _handle_help() -> None:
     """Display help text."""
     print("\nCommands:")
-    print("  /model <id>   - View or switch active model")
+    print("  /open <path>  - Open and attach local file or directory to context")
     print("  /save <path>  - Save code block from last reply to disk")
+    print("  /model <id>   - View or switch active model")
+    print("  /cd <dir>     - Switch active workspace root directory")
     print("  /status       - Check gateway status and token quota")
     print("  clear         - Clear conversation history")
     print("  exit          - Exit chat\n")
@@ -133,13 +139,41 @@ def _handle_chat_message(
 ) -> tuple[list, str]:
     """Send a user message, stream the reply, and update history. Returns (history, last_reply)."""
     print("\nMuse > ", end="", flush=True)
-    reply = stream_chat(prompt, model=model, history=history)
+    reply, actual_prompt = stream_chat(prompt, model=model, history=history)
     if reply:
-        history.append({"role": "user", "content": prompt})
+        history.append({"role": "user", "content": actual_prompt})
         history.append({"role": "assistant", "content": reply})
         last_reply = reply
     print()
     return history, last_reply
+
+
+def _handle_open(prompt: str, model: str, history: list,
+                 last_reply: str) -> tuple[str, list, str]:
+    """Attach a local path and feed an inspection prompt to the model."""
+    target = prompt.split(maxsplit=1)[1].strip()
+    p = Path(target)
+    if not p.is_absolute():
+        p = get_default_workspace() / p
+    if p.exists():
+        print(f"[Attached local path: {p}]")
+        sub_prompt = f"Please inspect the attached local code and analyze it:\n{p}"
+        new_history, new_reply = _handle_chat_message(sub_prompt, model, history, last_reply)
+        return "continue", new_history, new_reply
+    print(f"[Path not found: {target}]\n")
+    return "continue", history, last_reply
+
+
+def _handle_cd(prompt: str, history: list, last_reply: str) -> tuple[str, list, str]:
+    """Switch the active workspace directory."""
+    new_ws = prompt.split(maxsplit=1)[1].strip()
+    new_p = Path(new_ws)
+    if new_p.is_dir():
+        os.environ["MUSE_WORKSPACE_ROOT"] = str(new_p)
+        print(f"[Active workspace switched to: {new_p}]\n")
+    else:
+        print(f"[Directory not found: {new_ws}]\n")
+    return "continue", history, last_reply
 
 
 def _dispatch_command(prompt_lower: str, prompt: str, model: str,
@@ -148,11 +182,12 @@ def _dispatch_command(prompt_lower: str, prompt: str, model: str,
 
     Returns (action, history, last_reply) where action ∈ {"break", "continue", "chat"}.
     """
+    if prompt_lower in ("/clear", "clear", "/new", "new"):
+        clear_history, clear_reply = _handle_clear()
+        return "continue", clear_history, clear_reply
     if _handle_exit(prompt_lower):
         print("Goodbye!")
         return "break", history, last_reply
-    if prompt_lower in ("/clear", "clear"):
-        return "continue", *_handle_clear()
     if prompt_lower in ("/model", "/models", "model", "models", "/m"):
         _handle_model_view(model)
         return "continue", history, last_reply
@@ -160,6 +195,10 @@ def _dispatch_command(prompt_lower: str, prompt: str, model: str,
         return "continue", history, _handle_model_switch(prompt)
     if prompt_lower.startswith(("/save", "/write")):
         return "continue", history, _handle_save(last_reply)
+    if prompt_lower.startswith(("/open ", "/file ", "/folder ")):
+        return _handle_open(prompt, model, history, last_reply)
+    if prompt_lower.startswith(("/cd ", "/workspace ")):
+        return _handle_cd(prompt, history, last_reply)
     if prompt_lower in ("/status", "status"):
         _handle_status()
         return "continue", history, last_reply
@@ -171,7 +210,12 @@ def _dispatch_command(prompt_lower: str, prompt: str, model: str,
 
 def interactive_chat(model: str = DEFAULT_MODEL):
     """Run an interactive chat session with the selected model."""
-    print("=" * 60)
+    ws = get_default_workspace()
+    print("=" * 65)
+    print(f"  muse.ai Interactive Chat (model: {model})")
+    print(f"  Local file access: Enabled ({ws})")
+    print("  Commands: /open <path>, /save <file>, /model <id>, /cd <dir>, exit")
+    print("=" * 65 + "\n")
     print(f"  muse.ai Interactive Chat (model: {model})")
     print("  Local file access: Enabled (/Volumes/Drive D/...)")
     print("  Commands: /model, /save <file>, /file <path>, exit")

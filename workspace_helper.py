@@ -36,16 +36,70 @@ def _find_absolute_paths(text: str, found: list[Path]) -> None:
 
 
 def _find_relative_paths(text: str, base: Path, found: list[Path]) -> None:
-    """Look for relative paths or filenames in text."""
-    words = re.findall(r"[a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9]+", text)
-    for w in words:
-        cand = base / w
-        if _try_add_path(found, cand):
-            continue
-        if "." in w:
-            matches = list(base.glob(f"**/{w}"))
-            if matches and matches[0] not in found:
-                found.append(matches[0])
+    """Look for relative paths, filenames, or module folders in text."""
+    for w in re.findall(r"[a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9]+", text):
+        _try_find_file_path(w, base, found)
+
+    # Also search for module directory names (e.g. gap_reversal, strategies, options_trading)
+    ignore_tokens = {
+        "check", "explore", "figure", "inspect", "files", "folder", "directory",
+        "imports", "import", "project", "workspace", "local", "access", "enabled",
+        "please", "there", "their", "about", "would", "could", "should", "first",
+    }
+    for tok in re.findall(r"\b[a-zA-Z0-9_-]{4,}\b", text):
+        if tok.lower() not in ignore_tokens:
+            _try_find_dir_path(tok, base, found)
+
+
+def _try_find_file_path(w: str, base: Path, found: list[Path]) -> None:
+    """Try to resolve a relative file path (and glob for deeper matches)."""
+    cand = base / w
+    if _try_add_path(found, cand):
+        return
+    if "." in w:
+        matches = [m for m in base.glob(f"**/{w}") if not any(p.startswith(".") for p in m.parts)]
+        if matches and matches[0] not in found:
+            found.append(matches[0])
+
+
+def _try_find_dir_path(tok: str, base: Path, found: list[Path]) -> None:
+    """Try to resolve a module directory name (and glob for deeper matches)."""
+    cand = base / tok
+    if cand.is_dir() and _try_add_path(found, cand):
+        return
+    matches = [
+        m for m in base.glob(f"**/{tok}")
+        if m.is_dir() and not any(p.startswith(".") for p in m.parts)
+    ]
+    if matches and matches[0] not in found:
+        found.append(matches[0])
+
+
+def _resolve_sister_imports(text: str, base: Path, found: list[Path]) -> None:
+    """If inspecting a python file, resolve imported sister modules in the same package."""
+    _attach_sister_modules(text, found)
+    _attach_project_manifest(base, found)
+
+
+def _attach_sister_modules(text: str, found: list[Path]) -> None:
+    """Attach sibling modules next to any inspected Python file (when imports matter)."""
+    if not any(term in text.lower() for term in
+               ("import", "cross-file", "check", "fix", "explore", "detector")):
+        return
+    for f in list(found):
+        if f.is_file() and f.suffix == ".py":
+            pkg_dir = f.parent
+            for sister_name in ("config.py", "gap_quality_filters.py", "models.py", "__init__.py"):
+                s_path = pkg_dir / sister_name
+                if s_path.exists() and s_path not in found:
+                    found.append(s_path)
+
+
+def _attach_project_manifest(base: Path, found: list[Path]) -> None:
+    """Attach pyproject.toml from the repo root when present."""
+    pyproj = base / "pyproject.toml"
+    if pyproj.exists() and pyproj not in found:
+        found.append(pyproj)
 
 
 def find_local_paths(text: str, base_dir: Path | None = None) -> list[Path]:
@@ -54,9 +108,16 @@ def find_local_paths(text: str, base_dir: Path | None = None) -> list[Path]:
     found: list[Path] = []
     _find_absolute_paths(text, found)
     _find_relative_paths(text, base, found)
-    keywords = ("local file", "local repo", "workspace", "repo", "trading-firm", "codebase", "make edit")
+    keywords = (
+        "local file", "local repo", "workspace", "repo", "trading-firm",
+        "codebase", "make edit", "explore", "project", "gap_reversal"
+    )
     if not found and any(k in text.lower() for k in keywords):
         found.append(base)
+
+    if found:
+        _resolve_sister_imports(text, base, found)
+
     return found
 
 
@@ -67,15 +128,21 @@ def _collect_code_files(p: Path, limit: int = 50) -> list[str]:
     for root, dirs, fnames in os.walk(p):
         dirs[:] = [d for d in dirs if not _is_skipped_dir(d)]
         rel_root = Path(root).relative_to(p)
-        for f in fnames:
-            if _is_code_file(f, allowed_exts):
-                rel_path = rel_root / f if str(rel_root) != "." else Path(f)
-                files.append(str(rel_path))
-                if len(files) >= limit:
-                    break
+        _collect_from_dir(files, fnames, rel_root, allowed_exts, limit)
         if len(files) >= limit:
             break
     return sorted(files)
+
+
+def _collect_from_dir(files: list[str], fnames: list[str], rel_root: Path,
+                      allowed_exts: tuple[str, ...], limit: int) -> None:
+    """Collect code files from a single walked directory into ``files`` (capped)."""
+    for f in fnames:
+        if _is_code_file(f, allowed_exts):
+            rel_path = rel_root / f if str(rel_root) != "." else Path(f)
+            files.append(str(rel_path))
+            if len(files) >= limit:
+                break
 
 
 def _is_skipped_dir(d: str) -> bool:
@@ -124,20 +191,43 @@ def build_context_for_paths(paths: list[Path], max_chars: int = 35000) -> str:
     if not paths:
         return ""
 
+    base = get_default_workspace()
     blocks = [
         "[Local Workspace Access Enabled - Connected to macOS Machine]",
+        f"Connected Workspace Root: {base}",
         "Local file access is active. You can inspect local files and provide code updates.",
         "When providing code edits, output the full code in a ```python ... ``` code block.",
         "The user CLI supports saving your code directly to disk via `/save <filepath>`.",
     ]
+    seen_files: set[Path] = set()
+
     for p in paths:
-        if p.is_dir():
-            files = _collect_code_files(p)
-            _format_directory_block(p, blocks, files)
-        elif p.is_file():
-            _format_file_block(p, max_chars, blocks)
+        _append_path_context(p, base, blocks, seen_files, max_chars)
 
     return "\n".join(blocks)
+
+
+def _append_path_context(p: Path, base: Path, blocks: list[str],
+                         seen_files: set[Path], max_chars: int) -> None:
+    """Append the formatted block for one path (directory or file)."""
+    if p.is_dir():
+        files = _collect_code_files(p)
+        _format_directory_block(p, blocks, files)
+        # If p is a specific subfolder (e.g. gap_reversal), also attach the actual code files inside it!
+        if p != base and len(files) <= 15:
+            for f_rel in files:
+                _append_small_file(p / f_rel, blocks, seen_files)
+    elif p.is_file() and p not in seen_files:
+        seen_files.add(p)
+        _format_file_block(p, max_chars, blocks)
+
+
+def _append_small_file(f_p: Path, blocks: list[str], seen_files: set[Path]) -> None:
+    """Attach a small code file to the context (12k char cap)."""
+    if (f_p.is_file() and f_p.suffix in (".py", ".json", ".toml", ".yaml", ".md")
+            and f_p not in seen_files):
+        seen_files.add(f_p)
+        _format_file_block(f_p, 12000, blocks)
 
 
 def extract_code_block(text: str) -> str | None:
