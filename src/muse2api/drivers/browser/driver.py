@@ -18,9 +18,11 @@ import base64
 import contextlib
 import logging
 import os
+import subprocess
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -46,7 +48,7 @@ from ..base import (
     SessionInfo,
     VideoRequest,
 )
-from . import dom
+from . import dom, html_markdown
 from .cdp import CDPError, CDPSession
 from .chromium import ChromiumProcess, find_chromium
 from .html_markdown import html_to_markdown
@@ -152,6 +154,27 @@ class _Tab:
         return bool(self.turns or self.thread_url)
 
 
+_DRIVER_PATH = Path(__file__).resolve()
+_HTML_MARKDOWN_PATH = Path(html_markdown.__file__).resolve()
+
+
+def _git_commit() -> str:
+    """Short commit of the checkout this code runs from; 'unknown' otherwise."""
+    for parent in Path(__file__).resolve().parents:
+        if not (parent / ".git").exists():
+            continue
+        try:
+            done = subprocess.run(
+                ["git", "-C", str(parent), "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, timeout=5)
+            if done.returncode == 0 and done.stdout.strip():
+                return done.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+        break
+    return "unknown"
+
+
 class BrowserDriver(MuseDriver):
     name = "browser"
     capabilities = DriverCapabilities(
@@ -177,10 +200,14 @@ class BrowserDriver(MuseDriver):
 
     # ------------------------------------------------------------ lifecycle
     async def startup(self) -> None:
+        # Build identity first: if a stale gateway is still running somewhere,
+        # its log shows a different commit/paths than the code just deployed.
+        log.info("browser driver build: commit=%s driver.py=%s html_markdown=%s",
+                 _git_commit(), _DRIVER_PATH, _HTML_MARKDOWN_PATH)
         exe = find_chromium(self.settings.chromium_path)
         self._chromium = ChromiumProcess(
             exe, self.settings.cdp_port, self.settings.profile_dir, self.settings.headless,
-            proxy=self.settings.browser_proxy,
+            proxy=self.settings.browser_proxy, data_dir=self.settings.data_dir,
         )
         ws_url = await self._chromium.start()
         self._browser = await CDPSession.connect(ws_url)
