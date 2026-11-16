@@ -57,10 +57,10 @@ async def chat_completions(body: ChatCompletionRequest, request: Request,
     completion_id = "chatcmpl-" + uuid.uuid4().hex[:24]
     created = int(time.time())
     model_name = body.model or spec.id
-    stream = svc.gateway.chat_stream(req)
 
     if not body.stream:
-        text = "".join([d async for d in stream])
+        # The driver's final reply text itself, not a join of streamed deltas.
+        text = await svc.gateway.chat_complete(req)
         return {
             "id": completion_id,
             "object": "chat.completion",
@@ -74,6 +74,8 @@ async def chat_completions(body: ChatCompletionRequest, request: Request,
                 "total_tokens": _approx_tokens(flat.text) + _approx_tokens(text),
             },
         }
+
+    stream = svc.gateway.chat_stream(req)
 
     def chunk(delta: dict, finish: str | None = None) -> dict:
         return {"id": completion_id, "object": "chat.completion.chunk", "created": created,

@@ -93,13 +93,28 @@ def flatten_messages(messages: list[dict[str, Any]]) -> FlatPrompt:
     if not turns:
         return FlatPrompt(text="", images=images)
 
-    # A lone user turn is sent verbatim; anything richer gets role headers.
-    if len(turns) == 1 and turns[0][0] == "user":
-        return FlatPrompt(text=turns[0][1], images=images)
+    # The muse web chat has no system role, so system/developer messages are
+    # folded, in order, into a delimited block that leads the prompt; buried
+    # mid-transcript as "[System]" turns they were ignored by the model.
+    system = [text for role, text in turns if role in ("system", "developer")]
+    rest = [(role, text) for role, text in turns if role not in ("system", "developer")]
+    instructions = ""
+    if system:
+        instructions = "<system_instructions>\n" + "\n\n".join(system) + "\n</system_instructions>"
 
-    blocks = [f"[{ROLE_LABELS.get(role, role.title())}]\n{text}" for role, text in turns]
+    if not rest:
+        return FlatPrompt(text=instructions, images=images)
+
+    # A lone user turn is sent verbatim; anything richer gets role headers.
+    if len(rest) == 1 and rest[0][0] == "user":
+        body = rest[0][1]
+        return FlatPrompt(text=f"{instructions}\n\n{body}" if instructions else body,
+                          images=images)
+
+    blocks = [f"[{ROLE_LABELS.get(role, role.title())}]\n{text}" for role, text in rest]
     blocks.append(
         "[Instruction]\nContinue the conversation above and reply as the Assistant to the last "
         "User message. Output only the reply."
     )
-    return FlatPrompt(text="\n\n".join(blocks), images=images)
+    body = "\n\n".join(blocks)
+    return FlatPrompt(text=f"{instructions}\n\n{body}" if instructions else body, images=images)

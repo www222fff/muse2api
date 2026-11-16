@@ -17,8 +17,8 @@ def test_multi_turn_has_roles_and_images():
             {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
         ]},
     ])
-    assert "[System]\nbe brief" in flat.text
-    assert "[User]\nwhat is this" in flat.text
+    assert flat.text.startswith("<system_instructions>\nbe brief\n</system_instructions>")
+    assert "what is this" in flat.text
     assert flat.images == ["data:image/png;base64,AAAA"]
 
 
