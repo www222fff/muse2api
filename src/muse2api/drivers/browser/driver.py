@@ -49,6 +49,7 @@ from ..base import (
 from . import dom
 from .cdp import CDPError, CDPSession
 from .chromium import ChromiumProcess, find_chromium
+from .html_markdown import html_to_markdown
 
 log = logging.getLogger(__name__)
 
@@ -449,6 +450,17 @@ class BrowserDriver(MuseDriver):
 
     async def _state(self, tab: _Tab) -> dict:
         state = await tab.session.evaluate(dom.CHAT_STATE) or {}
+        # The bubble's innerText is the *rendered* text: markdown markers are
+        # lost and zero-width renderer artifacts leak in. Convert the bubble's
+        # HTML back to markdown so lastText is the reply's source form. The
+        # rendered text stays as the fallback if conversion ever fails.
+        if state.get("lastHtml"):
+            try:
+                state["lastText"] = html_to_markdown(state["lastHtml"]) \
+                    or state.get("lastText", "")
+            except Exception:  # noqa: BLE001 - polling must not die on one bad page
+                log.warning("bubble HTML to markdown failed; using rendered text",
+                            exc_info=True)
         tail = state.get("tail", "")
         low = tail.lower()
         if hit := next((h for h in dom.QUOTA_HINTS if h in low), None):
