@@ -17,7 +17,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
@@ -110,9 +110,33 @@ def _response_object(resp_id: str, msg_id: str, created: int, model: str, text: 
             "tool_choice": "auto", "tools": []}
 
 
+async def _collect_first(stream, svc):
+    """Pre-fetch the first delta; emit SSE heartbeats while waiting (C4)."""
+    interval = float(svc.settings.stream_heartbeat_interval)
+    if interval <= 0:
+        try:
+            return await anext(stream), []
+        except StopAsyncIteration:
+            return "", []
+    pending = asyncio.ensure_future(anext(stream))
+    heartbeats: list[bytes] = []
+    try:
+        while True:
+            done, _ = await asyncio.wait({pending}, timeout=interval)
+            if done:
+                try:
+                    return pending.result(), heartbeats
+                except StopAsyncIteration:
+                    return "", heartbeats
+            heartbeats.append(b": keepalive\n\n")
+    finally:
+        if not pending.done():
+            pending.cancel()
+
+
 @router.post("/v1/responses")
 async def create_response(body: ResponseRequest, request: Request,
-                          svc: Services = Depends(get_services)):
+                          svc: Annotated[Services, Depends(get_services)]):
     request.state.model = body.model  # logged even if it does not resolve
     spec = resolve_model(body.model, "chat")
     request.state.model = body.model or spec.id
@@ -149,25 +173,10 @@ async def create_response(body: ResponseRequest, request: Request,
         # 200 (headers) has already been committed to the client.
         seq = 0
         try:
-            if first is None and svc.settings.stream_heartbeat_interval > 0:
-                # Same C4 pattern as chat completions: send SSE comment
-                # heartbeats while the gateway waits for the first token.
-                pending = asyncio.ensure_future(anext(stream))
-                try:
-                    while True:
-                        done, _ = await asyncio.wait(
-                            {pending},
-                            timeout=svc.settings.stream_heartbeat_interval)
-                        if done:
-                            try:
-                                first = pending.result()
-                            except StopAsyncIteration:
-                                first = ""
-                            break
-                        yield b": keepalive\n\n"
-                finally:
-                    if not pending.done():
-                        pending.cancel()
+            if first is None:
+                first, heartbeats = await _collect_first(stream, svc)
+                for beat in heartbeats:
+                    yield beat
             yield _sse({"type": "response.created", "sequence_number": seq,
                         "response": _response_object(resp_id, msg_id, created, model_name,
                                                      "", flat.text, status="in_progress")})
@@ -214,7 +223,7 @@ async def create_response(body: ResponseRequest, request: Request,
             yield _sse({"error": {"message": "internal error", "type": "server_error"}})
         finally:
             cancel.set()
-            await stream.aclose()
+            await stream.aclose()  # type: ignore[attr-defined]  # upstream stream is an async generator
 
     # With stream_heartbeat_interval set (C4), the 200 goes out immediately;
     # upstream errors then surface as SSE error events instead of HTTP codes.

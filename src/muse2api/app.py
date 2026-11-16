@@ -49,7 +49,7 @@ def create_app(settings: Settings | None = None, driver: MuseDriver | None = Non
     settings.resolve_api_key()
     services = Services.build(settings, driver)
 
-    @asynccontextmanager
+    @asynccontextmanager  # pyrefly: ignore[deprecated]
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await services.pool.load()
         await services.tasks.load()

@@ -98,5 +98,5 @@ def test_blank_browser_profile_dir_falls_back_to_data_dir(tmp_path, monkeypatch)
     from muse2api.config import Settings
 
     monkeypatch.setenv("MUSE2API_BROWSER_PROFILE_DIR", "")
-    settings = Settings(_env_file=None, data_dir=tmp_path)
+    settings = Settings(_env_file=None, data_dir=tmp_path)  # type: ignore[call-arg]
     assert settings.profile_dir == tmp_path / "browser-profile"

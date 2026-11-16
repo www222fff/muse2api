@@ -96,7 +96,7 @@ class TaskManager:
 
     async def _run(self, task: Task, runner: Runner) -> None:
         def progress(p: int) -> None:
-            task.progress = max(task.progress, min(99, int(p)))
+            task.progress = max(task.progress, min(99, p))
             task.updated_at = time.time()
 
         task.status = TaskStatus.RUNNING

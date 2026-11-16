@@ -1,0 +1,6 @@
+# Pyrefly config mirroring pyrightconfig.json (venv + py3.12).
+python-version = "3.12"
+preset = "legacy"
+ignore-missing-imports = ["*"]
+check-unannotated-defs = true
+infer-return-types = "never"

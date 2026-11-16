@@ -1,0 +1,9 @@
+{
+  "venvPath": "/Users/Gaurav_Batra/muse2api",
+  "venv": ".venv",
+  "extraPaths": [
+    "/Users/Gaurav_Batra/muse2api/src",
+    "/Users/Gaurav_Batra/muse2api/.venv/lib/python3.12/site-packages",
+    "/opt/anaconda3/lib/python3.12/site-packages"
+  ]
+}

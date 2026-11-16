@@ -30,8 +30,8 @@ class Matting:
         try:
             import numpy as np
             from PIL import Image
-            from pymatting import estimate_foreground_ml
-            from rembg import new_session, remove
+            from pymatting import estimate_foreground_ml  # type: ignore[import-not-found]
+            from rembg import new_session, remove  # type: ignore[import-not-found]
         except ImportError as exc:
             raise FeatureNotImplemented(
                 "background=transparent needs the optional matting extra: "

@@ -4,6 +4,7 @@ import base64
 import mimetypes
 import time
 from dataclasses import replace
+from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import ValidationError
@@ -96,14 +97,14 @@ async def _run(body: ImageGenerationRequest, refs: list[InputImage], base: str,
 
 @router.post("/v1/images/generations")
 async def generate_images(body: ImageGenerationRequest, request: Request,
-                          svc: Services = Depends(get_services)) -> dict:
+                          svc: Annotated[Services, Depends(get_services)]) -> dict:
     refs = body.image if isinstance(body.image, list) else [body.image] if body.image else []
     loaded = [InputImage(*(await load_image_ref(ref))) for ref in refs]
     return await _generate(body, loaded, request, svc)
 
 
 @router.post("/v1/images/edits")
-async def edit_images(request: Request, svc: Services = Depends(get_services)) -> dict:
+async def edit_images(request: Request, svc: Annotated[Services, Depends(get_services)]) -> dict:
     """OpenAI-style multipart edit: ``image`` / ``image[]`` files plus a prompt.
 
     muse.ai has no inpainting, so the images act as references for a new image
@@ -118,7 +119,7 @@ async def edit_images(request: Request, svc: Services = Depends(get_services)) -
         raise InvalidRequest("at least one image file is required (field 'image' or 'image[]')")
     fields = {k: v for k, v in form.items() if isinstance(v, str) and k not in ("image", "image[]")}
     try:
-        body = ImageGenerationRequest(**fields)
+        body = ImageGenerationRequest(**cast(Any, fields))
     except ValidationError as exc:
         raise InvalidRequest(exc.errors()[0].get("msg", "invalid request")) from exc
     refs = []
@@ -132,7 +133,7 @@ async def edit_images(request: Request, svc: Services = Depends(get_services)) -
 
 @router.get("/v1/images/generations/{task_id}")
 async def get_image_task(task_id: str, request: Request,
-                         svc: Services = Depends(get_services)) -> dict:
+                         svc: Annotated[Services, Depends(get_services)]) -> dict:
     task = svc.tasks.get(task_id)
     if task is None or task.kind != "image":
         raise NotFound(f"image task '{task_id}' not found")

@@ -229,7 +229,7 @@ class AccountPool:
                 back_in = None if back_at is None else back_at - time.time()
                 if not busy and back_in is None:
                     raise NoAccountAvailable("no usable account in pool")
-                if remaining <= 0 or (not busy and back_in > remaining):
+                if remaining <= 0 or (back_in is not None and not busy and back_in > remaining):
                     # Nothing frees up before the deadline; say why instead of waiting in vain.
                     reason = "busy" if busy else "cooling down"
                     raise NoAccountAvailable(f"all accounts are {reason}, try again later")
@@ -271,7 +271,7 @@ class AccountPool:
             acc.status = AccountStatus.COOLING
             acc.cooldown_until = time.time() + self.cooldown
 
-    @asynccontextmanager
+    @asynccontextmanager  # pyrefly: ignore[deprecated]
     async def lease(
         self, *, exclude: Iterable[str] = (), hint: str | None = None, kind: str | None = None
     ) -> AsyncIterator[Lease]:

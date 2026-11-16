@@ -183,8 +183,8 @@ async def _pool(tmp_path, n=2) -> AccountPool:
 
 async def test_video_not_routed_to_unconfirmed_account(tmp_path):
     pool = await _pool(tmp_path)
-    note_wake(pool.get("a0"), {"vm_wake_ok": False, "vm_state_after": "SUSPENDED"})
-    blocked = pool.get("a0").meta["kind_blocked_until"]["video"]
+    note_wake(pool.get("a0"), {"vm_wake_ok": False, "vm_state_after": "SUSPENDED"})  # type: ignore[arg-type]
+    blocked = pool.get("a0").meta["kind_blocked_until"]["video"]  # type: ignore[attr-defined]
     assert time.time() + WAKE_BLOCK_SECONDS - 5 < blocked <= time.time() + WAKE_BLOCK_SECONDS
     for _ in range(3):
         acc = await pool.acquire(kind="video")
@@ -197,9 +197,9 @@ async def test_video_not_routed_to_unconfirmed_account(tmp_path):
 async def test_confirmed_wake_lifts_its_block(tmp_path):
     pool = await _pool(tmp_path)
     acc = pool.get("a0")
-    note_wake(acc, {"vm_wake_ok": False})
-    note_wake(acc, {"vm_wake_ok": True, "vm_state_after": "RUNNING"})
-    assert "video" not in acc.meta["kind_blocked_until"]
+    note_wake(acc, {"vm_wake_ok": False})  # type: ignore[arg-type]
+    note_wake(acc, {"vm_wake_ok": True, "vm_state_after": "RUNNING"})  # type: ignore[arg-type]
+    assert "video" not in acc.meta["kind_blocked_until"]  # type: ignore[attr-defined]
     assert (await pool.acquire(exclude={"a1"}, kind="video")).id == "a0"
 
 
@@ -207,19 +207,19 @@ async def test_confirmed_wake_keeps_a_longer_block(tmp_path):
     pool = await _pool(tmp_path)
     acc = pool.get("a0")
     longer = time.time() + 12 * 3600
-    acc.meta["kind_blocked_until"] = {"video": longer}
-    note_wake(acc, {"vm_wake_ok": False})  # shorter, so it changes nothing
-    note_wake(acc, {"vm_wake_ok": True})
-    assert acc.meta["kind_blocked_until"]["video"] == longer
+    acc.meta["kind_blocked_until"] = {"video": longer}  # type: ignore[attr-defined]
+    note_wake(acc, {"vm_wake_ok": False})  # shorter, so it changes nothing  # type: ignore[arg-type]
+    note_wake(acc, {"vm_wake_ok": True})  # type: ignore[arg-type]
+    assert acc.meta["kind_blocked_until"]["video"] == longer  # type: ignore[attr-defined]
 
 
 async def test_renewal_without_wake_leaves_blocks_alone(tmp_path):
     pool = await _pool(tmp_path)
     acc = pool.get("a0")
-    note_wake(acc, {"vm_wake_ok": False})
-    before = dict(acc.meta["kind_blocked_until"])
-    note_wake(acc, {"session_status": "assigned"})
-    assert acc.meta["kind_blocked_until"] == before
+    note_wake(acc, {"vm_wake_ok": False})  # type: ignore[arg-type]
+    before = dict(acc.meta["kind_blocked_until"])  # type: ignore[attr-defined]
+    note_wake(acc, {"session_status": "assigned"})  # type: ignore[arg-type]
+    assert acc.meta["kind_blocked_until"] == before  # type: ignore[attr-defined]
 
 
 async def test_every_account_unconfirmed_still_serves_video(tmp_path):
@@ -231,7 +231,7 @@ async def test_every_account_unconfirmed_still_serves_video(tmp_path):
 
 async def test_gateway_routes_video_around_an_unconfirmed_account(tmp_path):
     pool = await _pool(tmp_path)
-    note_wake(pool.get("a0"), {"vm_wake_ok": False})
+    note_wake(pool.get("a0"), {"vm_wake_ok": False})  # type: ignore[arg-type]
     gateway = Gateway(pool, MockDriver())
 
     async def which(acc: Account) -> str:

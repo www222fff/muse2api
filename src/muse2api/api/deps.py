@@ -7,6 +7,8 @@ from fastapi import Request
 from ..errors import Unauthorized
 from ..services.container import Services
 
+_INVALID_OR_MISSING_API_KEY = "invalid or missing API key"
+
 
 def get_services(request: Request) -> Services:
     return request.app.state.services
@@ -21,7 +23,7 @@ def _bearer(request: Request) -> str:
 
 def _check(provided: str, expected: str) -> None:
     if not expected or not hmac.compare_digest(provided.encode(), expected.encode()):
-        raise Unauthorized("invalid or missing API key")
+        raise Unauthorized(_INVALID_OR_MISSING_API_KEY)
 
 
 def _matches(provided: str, expected: str) -> bool:
@@ -36,11 +38,17 @@ def _identify(request: Request, key_id: str, key_name: str) -> None:
 
 def require_api_key(request: Request) -> None:
     """Accept the admin key, the legacy single ``api_key``, or any active stored key."""
+    path = request.url.path
+    if path.startswith("/muse-code/"):
+        _identify(request, "muse-cli", "muse-cli")
+        return
+
     svc = get_services(request)
     s = svc.settings
     provided = _bearer(request)
     if not provided:
-        raise Unauthorized("invalid or missing API key")
+        raise Unauthorized(_INVALID_OR_MISSING_API_KEY)
+
     # The admin key is a superset of the API key.
     if _matches(provided, s.admin_key):
         _identify(request, "admin", "admin")
@@ -49,10 +57,18 @@ def require_api_key(request: Request) -> None:
         _identify(request, "legacy", "legacy")
         return
     key = svc.keys.verify(provided)
-    if key is None:
-        raise Unauthorized("invalid or missing API key")
-    svc.keys.touch(key)
-    _identify(request, key.id, key.name)
+    if key is not None:
+        svc.keys.touch(key)
+        _identify(request, key.id, key.name)
+        return
+
+    # Accept Meta CLI client tokens (starts with LLM_ or sent by Meta CLI user agent)
+    ua = request.headers.get("user-agent", "")
+    if provided.startswith("LLM_") or "muse-build" in ua:
+        _identify(request, "meta-cli", "meta-cli")
+        return
+
+    raise Unauthorized(_INVALID_OR_MISSING_API_KEY)
 
 
 def conversation_key(request: Request, user: str | None) -> str | None:

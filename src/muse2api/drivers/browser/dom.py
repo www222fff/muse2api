@@ -141,7 +141,7 @@ def fill_input(text: str) -> str:
 CLICK_SEND = """(() => {
   const btn = [...document.querySelectorAll('button,[role=button]')]
     .filter(b => b.offsetParent !== null)
-    .find(b => /send|发送/i.test((b.getAttribute('aria-label') || '') + ' ' + (b.getAttribute('data-testid') || '')));
+    .find(b => /send|发送|發送|submit/i.test((b.getAttribute('aria-label') || '') + ' ' + (b.getAttribute('data-testid') || '')));
   if (!btn) return 'missing';
   if (btn.disabled) return 'disabled';
   btn.click();
@@ -227,13 +227,13 @@ QUOTA_DIALOG_TEXT = """(() => {
 
 _USAGE_HEADINGS = ("usage", "用量", "使用量")
 _LANGUAGE_HEADINGS = ("language", "语言", "語言")
-_PLAN = re.compile(r".{1,60}?(?:\s+plan|計劃|计划|方案)", re.IGNORECASE)
+_PLAN = re.compile(r"(?:\bplan\b|計劃|计划|方案)", re.IGNORECASE)
 _RESET_EN = re.compile(r"Weekly limit resets? on ([^\n]+)", re.IGNORECASE)
 _RESET_ZH = re.compile(r"(?:每(?:週|周|星期)|週|周)(?:上限|限額|限额|額度|额度)"
-                       r"(?:會|会|將|将)?(?:於|于|在)\s*([^\n]+?)\s*(?:重設|重置)")
+                       r"(?:會|会|將|将)?(?:於|于|在)\s*([^\n]*?)\s*(?:重設|重置)\b")
 _EXTRA = re.compile(r"^(?:(?:Additional|Extra)\s+tokens|(?:額外|额外)(?:的)?"
                     r"(?:符元|符記|代幣|代币|令牌|憑證|凭证|tokens))", re.IGNORECASE)
-_PCT_USED = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*(?:used\b|已(?:使)?用)", re.IGNORECASE)
+_PCT_USED = re.compile(r"((?:\d+\.\d+|\d+))\s*%\s*(?:used|已用|已使用的)")
 _USED_PCT = re.compile(r"已(?:使)?用\s*(\d+(?:\.\d+)?)\s*%")
 
 
@@ -262,16 +262,20 @@ def parse_usage_text(text: str | None) -> dict[str, Any]:
 
     out: dict[str, Any] = {"plan": None, "weekly_used_pct": None, "resets_at": None,
                            "extra_left": None}
-    out["plan"] = next((ln for ln in lines if _PLAN.fullmatch(ln)), None)
+    out["plan"] = next((ln for ln in lines if _PLAN.search(ln)), None)
     if reset := (_RESET_EN.search(joined) or _RESET_ZH.search(joined)):
         out["resets_at"] = reset.group(1).strip()
     extra_at = next((i for i, ln in enumerate(lines) if _EXTRA.match(ln)), len(lines))
     out["weekly_used_pct"] = next(
         (v for ln in lines[:extra_at] if (v := _used_pct(ln)) is not None), None)
     for ln in lines[extra_at:]:
+        if left := re.search(r"\(([^)]+)\)", ln):
+            out["extra_left"] = left.group(1).strip()
+            break
         if _used_pct(ln) is not None:
-            if left := re.search(r"\(([^)]+)\)", ln):
-                out["extra_left"] = left.group(1).strip()
+            continue
+        if re.search(r"\b\d+[A-Z]?\s+(?:tokens?|令牌|憑證|代幣)(?:\s+(?:left|remaining))?\b", ln, re.IGNORECASE):
+            out["extra_left"] = ln.strip()
             break
     out["found"] = out["weekly_used_pct"] is not None
     return out

@@ -243,11 +243,11 @@ def test_failed_task_counts_as_error(client, auth, admin, monkeypatch):
             break
         time.sleep(0.01)
     # Both submits answered 200; only the task outcome tells them apart.
-    assert rows[ok["id"]]["status_code"] == rows[bad["id"]]["status_code"] == 200
-    assert rows[ok["id"]]["task_status"] == "succeeded"
-    assert rows[bad["id"]]["task_status"] == "failed"
-    assert rows[bad["id"]]["error"] == "video generation timed out"
-    assert rows[bad["id"]]["task_ms"] >= 0
+    assert rows[ok["id"]]["status_code"] == rows[bad["id"]]["status_code"] == 200  # type: ignore[possibly-unbound]
+    assert rows[ok["id"]]["task_status"] == "succeeded"  # type: ignore[possibly-unbound]
+    assert rows[bad["id"]]["task_status"] == "failed"  # type: ignore[possibly-unbound]
+    assert rows[bad["id"]]["error"] == "video generation timed out"  # type: ignore[possibly-unbound]
+    assert rows[bad["id"]]["task_ms"] >= 0  # type: ignore[possibly-unbound]
     assert [r["task_id"] for r in _requests(client, admin, status="failed")] == [bad["id"]]
 
     s = client.get("/admin/stats", headers=admin, params={"window": "1h"}).json()

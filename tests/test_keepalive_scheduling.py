@@ -69,9 +69,9 @@ async def test_maintenance_does_not_count_as_use(tmp_path):
     pool, driver = await _pool(tmp_path), RecordingDriver()
     result = await renew_account(pool, driver, "on")
     acc = pool.get("on")
-    assert result["ok"] and acc.cookies["hatch_sess"] == "rotated"
-    assert acc.last_used_at == 1234.0 and acc.success_count == 7
-    assert acc.meta["renewed_at"] > time.time() - 5
+    assert result["ok"] and acc.cookies["hatch_sess"] == "rotated"  # type: ignore[attr-defined]
+    assert acc.last_used_at == 1234.0 and acc.success_count == 7  # type: ignore[attr-defined]
+    assert acc.meta["renewed_at"] > time.time() - 5  # type: ignore[attr-defined]
     assert pool.stats()["inflight"] == 0
 
 
@@ -81,12 +81,12 @@ async def test_unconfirmed_wake_from_keepalive_blocks_video(tmp_path):
                               "vm_state_after": "SUSPENDED"})
     await renew_account(pool, driver, "on")
     acc = pool.get("on")
-    assert acc.meta["vm_wake_ok"] is False and acc.meta["vm_state_after"] == "SUSPENDED"
-    assert acc.meta["kind_blocked_until"]["video"] > time.time()
+    assert acc.meta["vm_wake_ok"] is False and acc.meta["vm_state_after"] == "SUSPENDED"  # type: ignore[attr-defined]
+    assert acc.meta["kind_blocked_until"]["video"] > time.time()  # type: ignore[attr-defined]
 
     driver.meta = {"session_status": "assigned", "vm_wake_ok": True, "vm_state_after": "RUNNING"}
     await renew_account(pool, driver, "on")
-    assert "video" not in acc.meta["kind_blocked_until"]
+    assert "video" not in acc.meta["kind_blocked_until"]  # type: ignore[attr-defined]
 
 
 async def test_driver_without_renewal_is_skipped(tmp_path):
@@ -97,4 +97,4 @@ async def test_driver_without_renewal_is_skipped(tmp_path):
     pool = await _pool(tmp_path)
     result = await renew_account(pool, NoRenew(), "on")
     assert result == {"ok": False, "error": "no renewal"}
-    assert "renewed_at" not in pool.get("on").meta
+    assert "renewed_at" not in pool.get("on").meta  # type: ignore[attr-defined]

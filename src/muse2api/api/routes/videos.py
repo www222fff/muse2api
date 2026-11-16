@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, Request
 
 from ...core.media import load_image_ref
@@ -29,7 +31,7 @@ def _task_view(task: Task) -> dict:
 
 @router.post("/v1/videos")
 async def create_video(body: VideoCreateRequest, request: Request,
-                       svc: Services = Depends(get_services)) -> dict:
+                       svc: Annotated[Services, Depends(get_services)]) -> dict:
     request.state.model = body.model  # logged even if it does not resolve
     spec = resolve_model(body.model, "video")
     request.state.model = body.model or spec.id
@@ -55,7 +57,7 @@ async def create_video(body: VideoCreateRequest, request: Request,
 
 @router.get("/v1/videos/{task_id}")
 async def get_video(task_id: str, request: Request,
-                    svc: Services = Depends(get_services)) -> dict:
+                    svc: Annotated[Services, Depends(get_services)]) -> dict:
     task = svc.tasks.get(task_id)
     if task is None or task.kind != "video":
         raise NotFound(f"video task '{task_id}' not found")
