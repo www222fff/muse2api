@@ -739,6 +739,8 @@ class BrowserDriver(MuseDriver):
                         f"reply done agent_count={st.get('agentCount')} "
                         f"bubble_index={(st.get('agentCount') or 1) - 1} "
                         f"final_len={len(text)}")
+                    _prompt_debug(
+                        f"final bubble html>>>{(st.get('lastHtml') or '')[:4000]}<<<")
                     return
 
     async def _finish_chat(self, tab: _Tab, account: Account, req: ChatRequest,
