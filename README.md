@@ -294,10 +294,10 @@ curl http://localhost:18610/admin/accounts \
 > controls, so `tools` and `tool_choice` in a chat request are accepted for
 > client compatibility and **ignored**: the model never sees them and responses
 > never contain `tool_calls`. The same applies to sampling parameters
-> (`temperature`, `top_p`, `max_tokens`). System and developer messages *are*
-> honoured: they are folded, in order, into a `<system_instructions>` block at
-> the start of the prompt sent to the muse web chat, which has no native
-> system role.
+> (`temperature`, `top_p`, `max_tokens`). System and developer messages are
+> forwarded inside a `<system_instructions>` block at the start of the prompt
+> on a best-effort basis: the muse chat has no native system role, so whether
+> the upstream model treats the block as binding instructions is up to it.
 
 ### Dashboard, API keys and request log
 

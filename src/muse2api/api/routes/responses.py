@@ -133,15 +133,17 @@ async def create_response(body: ResponseRequest, request: Request,
         turns=message_turns(messages),
         cancel=cancel,
     )
-    stream = svc.gateway.chat_stream(req)
     resp_id = "resp_" + uuid.uuid4().hex[:24]
     msg_id = "msg_" + uuid.uuid4().hex[:24]
     created = int(time.time())
     model_name = body.model or spec.id
 
     if not body.stream:
-        text = "".join([d async for d in stream])
+        # The driver's final reply text itself, not a join of streamed deltas.
+        text = await svc.gateway.chat_complete(req)
         return _response_object(resp_id, msg_id, created, model_name, text, flat.text)
+
+    stream = svc.gateway.chat_stream(req)
 
     async def events(first: str | None) -> AsyncIterator[bytes]:
         # ``first`` is the pre-fetched first delta when heartbeats are disabled;

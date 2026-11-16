@@ -48,7 +48,10 @@ class _TreeBuilder(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if self._dropped or tag in _DROPPED:
-            self._dropped += 1
+            # Void tags never get an end tag, so counting them would keep the
+            # dropped subtree open forever and swallow the rest of the reply.
+            if tag not in _VOID:
+                self._dropped += 1
             return
         node = _Node(tag, {k: v or "" for k, v in attrs})
         self._stack[-1].children.append(node)
@@ -61,7 +64,8 @@ class _TreeBuilder(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         if self._dropped:
-            self._dropped -= 1
+            if tag not in _VOID:
+                self._dropped -= 1
             return
         for i in range(len(self._stack) - 1, 0, -1):
             if self._stack[i].tag == tag:
@@ -128,33 +132,97 @@ def _fenced(node: _Node) -> str:
             language = match.group(1) if match else ""
             break
     body = _plain_text(code).translate(_ZERO_WIDTH).rstrip("\n")
-    return f"```{language}\n{body}\n```"
+    # The fence must outrun any backtick run inside the body, or a code block
+    # that itself contains a fenced block would terminate the outer fence.
+    longest = max((len(run) for run in re.findall(r"`+", body)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}{language}\n{body}\n{fence}"
+
+
+_RENDERER_BULLET = re.compile("^[-\\u2022*]\\u200b\\s*")
+
+
+def _strip_renderer_bullet(node: _Node) -> bool:
+    """Remove a renderer bullet glyph from the first text node below ``node``.
+
+    The page's list rendering can leave a literal "-\\u200b" text node inside
+    an <li>; converted naively it would duplicate the marker we generate
+    ("- -item"). Only the exact artifact shape — a bullet char immediately
+    followed by U+200B — is stripped, so a legitimate leading dash survives.
+    Returns True once a text node has been processed.
+    """
+    for i, child in enumerate(node.children):
+        if isinstance(child, str):
+            if child:
+                node.children[i] = _RENDERER_BULLET.sub("", child, count=1)
+                return True
+            continue
+        if _is_block(child):
+            return False
+        if _strip_renderer_bullet(child):
+            return True
+    return False
 
 
 def _list_item_lines(item: _Node, marker: str, depth: int) -> list[str]:
+    _strip_renderer_bullet(item)
     indent = "  " * depth
-    lines: list[str] = []
-    inline_run: list[_Node | str] = []
-    wrote_first = False
+    content_indent = indent + " " * len(marker)
+    # Segments: ("text", [line]) for inline runs and paragraphs, ("list",
+    # lines) for a nested list, ("block", lines) for any other block child.
+    # Each block child keeps its own rendering instead of being flattened
+    # into the item's inline text.
+    segments: list[tuple[str, list[str]]] = []
+    run: list[_Node | str] = []
 
-    def flush() -> None:
-        nonlocal wrote_first
-        text = _inline(inline_run)
-        inline_run.clear()
-        if text or not wrote_first:
-            prefix = indent + marker if not wrote_first else indent + " " * len(marker)
-            lines.append(prefix + text if text else prefix.rstrip())
-            wrote_first = True
+    def flush_run() -> None:
+        text = _inline(run)
+        run.clear()
+        if text:
+            segments.append(("text", [text]))
 
     for part in item.children:
         if isinstance(part, _Node) and part.tag in ("ul", "ol"):
-            flush()
-            lines.extend(_list_lines(part, depth + 1))
+            flush_run()
+            segments.append(("list", _list_lines(part, depth + 1)))
         elif isinstance(part, _Node) and part.tag == "p":
-            inline_run.extend(part.children)
+            flush_run()
+            text = _inline(part.children)
+            if text:
+                segments.append(("text", [text]))
+        elif isinstance(part, _Node) and _is_block(part):
+            flush_run()
+            rendered = _block(part)
+            if rendered:
+                segments.append(("block", rendered.split("\n")))
         else:
-            inline_run.append(part)
-    flush()
+            run.append(part)
+    flush_run()
+
+    if not segments:
+        return [indent + marker.rstrip()]
+
+    def indented(seg_lines: list[str]) -> list[str]:
+        return [content_indent + line if line else line for line in seg_lines]
+
+    kind, seg_lines = segments[0]
+    if kind == "text":
+        lines = [indent + marker + seg_lines[0]]
+    elif kind == "list":
+        lines = [indent + marker.rstrip(), *seg_lines]
+    else:
+        lines = [indent + marker.rstrip(), *indented(seg_lines)]
+    for i, (kind, seg_lines) in enumerate(segments[1:], start=1):
+        if kind == "list":
+            # Nested-list lines already carry the depth + 1 indent, which is
+            # exactly this item's content column.
+            lines.extend(seg_lines)
+        elif kind == "text":
+            if segments[i - 1][0] in ("text", "block"):
+                lines.append("")
+            lines.append(content_indent + seg_lines[0])
+        else:
+            lines.extend(indented(seg_lines))
     return lines
 
 

@@ -85,21 +85,47 @@ def is_thread_url(url: str) -> bool:
     return path.startswith("/thread/") and path != "/thread/new"
 
 
-def snapshot_delta(emitted: str, current: str) -> str:
-    """The part of a cumulative page snapshot that has not been emitted yet.
-
-    The page reports the reply-so-far in full on every poll, and its rendering
-    is not prefix-stable (a growing bubble re-wraps, moving line breaks), so a
-    strict prefix check re-sends the whole text whenever an early character
-    shifts. Diffing on the longest common prefix re-sends at most the
-    divergent tail, and for snapshots that only grow it yields exactly the
-    new suffix, so joining the deltas reproduces the final text once.
-    """
-    limit = min(len(emitted), len(current))
+def _common_prefix(a: str, b: str) -> str:
+    limit = min(len(a), len(b))
     i = 0
-    while i < limit and emitted[i] == current[i]:
+    while i < limit and a[i] == b[i]:
         i += 1
-    return current[i:]
+    return a[:i]
+
+
+class SnapshotDeltas:
+    """Turn cumulative page snapshots into append-only stream deltas.
+
+    The page's reply text is not prefix-stable while it grows (a closing
+    code fence or ``**`` marker moves as lines are added), so a delta taken
+    straight from one snapshot can contradict the next. Only the prefix two
+    consecutive snapshots agree on is stable enough to send, and only when
+    it extends what the client already received (``sent``): a delta is
+    never emitted that is not an extension of ``sent``, so joining the
+    deltas can never duplicate or garble text. ``finish`` flushes the
+    remainder once the reply is final, or returns ``None`` when the final
+    text diverges from ``sent`` (the difference cannot be retracted).
+    """
+
+    def __init__(self) -> None:
+        self.sent = ""
+        self._previous = ""
+
+    def feed(self, current: str) -> str:
+        stable = _common_prefix(self._previous, current)
+        self._previous = current
+        if len(stable) > len(self.sent) and stable.startswith(self.sent):
+            delta = stable[len(self.sent):]
+            self.sent = stable
+            return delta
+        return ""
+
+    def finish(self, final: str) -> str | None:
+        if final.startswith(self.sent):
+            delta = final[len(self.sent):]
+            self.sent = final
+            return delta
+        return None
 
 
 @dataclass
@@ -588,66 +614,109 @@ class BrowserDriver(MuseDriver):
             await self._checkin(tab)
             raise
 
-    async def chat_stream(self, account: Account, req: ChatRequest) -> AsyncIterator[str]:
-        tab, base = await self._begin_chat(account, req)
+    async def _poll_reply(self, tab: _Tab, base: dict,
+                          req: ChatRequest) -> AsyncIterator[str]:
+        """Yield each new reply snapshot until the reply is finished.
+
+        Ends without a final yield when the request is cancelled; raises
+        ``UpstreamTimeout`` on timeouts and a stalled page. The caller owns
+        the tab's checkin via ``_finish_chat``.
+        """
         base_count, base_text = base.get("agentCount", 0), base.get("lastText", "")
         started = time.monotonic()
-        emitted, last, stable, got_first = "", None, 0, False
+        last, stable, got_first = None, 0, False
+        while True:
+            if req.cancel and req.cancel.is_set():
+                return
+            elapsed = time.monotonic() - started
+            if elapsed > req.timeout:
+                raise UpstreamTimeout("assistant reply timed out")
+            if not got_first and elapsed > req.first_token_timeout:
+                raise UpstreamTimeout("no first token from assistant")
+            await asyncio.sleep(POLL_INTERVAL)
+            st = await self._state(tab)
+            if st.get("approval"):
+                await self._deny_approvals(tab)
+                continue
+            text = st.get("lastText", "")
+            is_new = st.get("agentCount", 0) > base_count or (text and text != base_text)
+            if not is_new or not text:
+                if elapsed > STALL_GIVE_UP and any(h in st.get("tail", "") for h in dom.STALL_HINTS):
+                    raise UpstreamTimeout("upstream workspace is stuck connecting")
+                continue
+            got_first = True
+            if text != last:
+                last, stable = text, 0
+                yield text
+            else:
+                stable += 1
+                if (not st.get("generating") and stable >= STABLE_POLLS_DONE) or stable >= STABLE_POLLS_FORCE:
+                    return
+
+    async def _finish_chat(self, tab: _Tab, account: Account, req: ChatRequest,
+                           finished: bool) -> None:
+        # Only a named conversation is kept: an anonymous one can never be
+        # continued, so holding it would just keep the tab from counting as fresh.
+        if finished and req.conversation_hint:
+            url = ""
+            for _ in range(10):
+                url = await self._href(tab)
+                if is_thread_url(url):
+                    break
+                await asyncio.sleep(0.2)
+            self._save_hot(tab, account, req, url if is_thread_url(url) else "")
+            if tab.thread_url:
+                log.info("saved hot page %s", tab.thread_url)
+            else:
+                log.info("reply finished but the thread url was not ready yet")
+        else:
+            self._forget(tab)
+        await self._checkin(tab)
+        self.prewarm(account)
+
+    async def chat_stream(self, account: Account, req: ChatRequest) -> AsyncIterator[str]:
+        tab, base = await self._begin_chat(account, req)
+        deltas = SnapshotDeltas()
+        final = ""
         finished = False
         try:
-            while True:
-                if req.cancel and req.cancel.is_set():
-                    return
-                elapsed = time.monotonic() - started
-                if elapsed > req.timeout:
-                    raise UpstreamTimeout("assistant reply timed out")
-                if not got_first and elapsed > req.first_token_timeout:
-                    raise UpstreamTimeout("no first token from assistant")
-                await asyncio.sleep(POLL_INTERVAL)
-                st = await self._state(tab)
-                if st.get("approval"):
-                    await self._deny_approvals(tab)
-                    continue
-                text = st.get("lastText", "")
-                is_new = st.get("agentCount", 0) > base_count or (text and text != base_text)
-                if not is_new or not text:
-                    if elapsed > STALL_GIVE_UP and any(h in st.get("tail", "") for h in dom.STALL_HINTS):
-                        raise UpstreamTimeout("upstream workspace is stuck connecting")
-                    continue
-                got_first = True
-                if text != last:
-                    delta = snapshot_delta(emitted, text)
-                    emitted = text
-                    if delta:
-                        yield delta
-                    last, stable = text, 0
-                else:
-                    stable += 1
-                    if (not st.get("generating") and stable >= STABLE_POLLS_DONE) or stable >= STABLE_POLLS_FORCE:
-                        finished = True
-                        return
+            async for text in self._poll_reply(tab, base, req):
+                final = text
+                delta = deltas.feed(text)
+                if delta:
+                    yield delta
+            finished = not (req.cancel and req.cancel.is_set())
+            if finished:
+                tail = deltas.finish(final)
+                if tail is None:
+                    # The page replaced text the client already received; an
+                    # append-only stream cannot retract it.
+                    log.warning("final reply diverges from the streamed text "
+                                "on %s; keeping the streamed prefix",
+                                tab.thread_url or "new thread")
+                elif tail:
+                    yield tail
         except CDPError as exc:
             await self._close_tab(tab)
             raise UpstreamError(f"browser error: {exc}") from exc
         finally:
-            # Only a named conversation is kept: an anonymous one can never be
-            # continued, so holding it would just keep the tab from counting as fresh.
-            if finished and req.conversation_hint:
-                url = ""
-                for _ in range(10):
-                    url = await self._href(tab)
-                    if is_thread_url(url):
-                        break
-                    await asyncio.sleep(0.2)
-                self._save_hot(tab, account, req, url if is_thread_url(url) else "")
-                if tab.thread_url:
-                    log.info("saved hot page %s", tab.thread_url)
-                else:
-                    log.info("reply finished but the thread url was not ready yet")
-            else:
-                self._forget(tab)
-            await self._checkin(tab)
-            self.prewarm(account)
+            await self._finish_chat(tab, account, req, finished)
+
+    async def chat_complete(self, account: Account, req: ChatRequest) -> str:
+        """The final reply snapshot itself, not a join of streamed deltas."""
+        tab, base = await self._begin_chat(account, req)
+        final = ""
+        finished = False
+        try:
+            async for text in self._poll_reply(tab, base, req):
+                final = text
+            finished = not (req.cancel and req.cancel.is_set())
+            return final
+        except CDPError as exc:
+            await self._close_tab(tab)
+            raise UpstreamError(f"browser error: {exc}") from exc
+        finally:
+            await self._finish_chat(tab, account, req, finished)
 
     # ------------------------------------------------------------ warm threads
     _WARM_REPLY_TIMEOUT = 90.0

@@ -102,3 +102,38 @@ async def test_driver_state_converts_bubble_html_to_markdown(tmp_path):
     state = await driver._state(_Tab("a0", "ctx", "t", _Session()))
     for heading in HEADINGS:
         assert state["lastText"].count(heading) == 1
+
+
+def test_void_tags_inside_dropped_subtrees_do_not_swallow_the_reply():
+    # br/img/input never get end tags; counting them as dropped elements
+    # would leave the drop counter open and eat everything after the button.
+    assert html_to_markdown("<button>x<br></button><p>kept</p>") == "kept"
+    assert html_to_markdown(
+        '<svg><img src="a.png"><input type="text"></svg><p>kept</p>') == "kept"
+    assert html_to_markdown(
+        '<button><img src="a.png">x<input type="checkbox"></button><p>kept</p>') == "kept"
+
+
+def test_loose_list_item_paragraphs_are_separated():
+    assert html_to_markdown("<ul><li><p>A</p><p>B</p></li></ul>") == "- A\n\n  B"
+
+
+def test_list_item_with_code_block_keeps_the_fence_indented():
+    html = "<ul><li>Code:<pre><code>x = 1</code></pre></li></ul>"
+    assert html_to_markdown(html) == "- Code:\n  ```\n  x = 1\n  ```"
+
+
+def test_list_item_with_nested_ordered_list():
+    html = "<ul><li>Steps:<ol><li>one</li><li>two</li></ol></li></ul>"
+    assert html_to_markdown(html) == "- Steps:\n  1. one\n  2. two"
+
+
+def test_renderer_bullet_artifact_is_not_duplicated():
+    assert html_to_markdown("<ul><li>-\u200bItem</li></ul>") == "- Item"
+    # A legitimate leading dash (no U+200B after it) survives.
+    assert html_to_markdown("<ul><li>-5 degrees</li></ul>") == "- -5 degrees"
+
+
+def test_fence_outruns_backtick_runs_in_the_body():
+    html = "<pre><code>before\n```\ninner\n```\nafter</code></pre>"
+    assert html_to_markdown(html) == "````\nbefore\n```\ninner\n```\nafter\n````"

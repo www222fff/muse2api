@@ -20,7 +20,7 @@ from muse2api.accounts.model import Account
 from muse2api.app import create_app
 from muse2api.core.prompt import flatten_messages
 from muse2api.drivers.base import ChatRequest, DriverCapabilities, MuseDriver
-from muse2api.drivers.browser.driver import snapshot_delta
+from muse2api.drivers.browser.driver import SnapshotDeltas
 
 
 class ScriptedDriver(MuseDriver):
@@ -52,13 +52,11 @@ def scripted(settings):
 
 def _assemble_from_snapshots(snapshots: list[str]) -> str:
     """Fold cumulative snapshots exactly as ``BrowserDriver.chat_stream`` does."""
-    emitted, out = "", []
-    for text in snapshots:
-        delta = snapshot_delta(emitted, text)
-        emitted = text
-        if delta:
-            out.append(delta)
-    return "".join(out)
+    deltas = SnapshotDeltas()
+    out = [deltas.feed(text) for text in snapshots]
+    tail = deltas.finish(snapshots[-1])
+    assert tail is not None
+    return "".join(out) + tail
 
 
 # ------------------------------------------------------------- bug 1: system
@@ -140,20 +138,53 @@ def test_long_system_prompt_passes_through_intact(scripted, auth):
 
 # ------------------------------------------------------- bug 2: exactly once
 
-def test_cumulative_snapshots_assemble_to_final_text_once():
+def test_snapshots_pure_growth_assemble_to_final_text():
     snapshots = ["The login page", "The login page has", "The login page has a form",
                  "The login page has a form."]
     assert _assemble_from_snapshots(snapshots) == snapshots[-1]
     assert _assemble_from_snapshots(["P", "PI", "PIN", "PINE", "PINEAPPLE"]) == "PINEAPPLE"
 
 
-def test_reflowed_snapshot_never_resends_the_full_text():
-    # innerText re-wraps as the bubble grows: an early line break moves, so the
-    # new snapshot is not an extension of the previous one. The old code yielded
-    # the entire snapshot again; the delta must be only the divergent tail.
-    delta = snapshot_delta("Hello\nworld", "Hello world again")
-    assert delta != "Hello world again"
-    assert len(delta) < len("Hello world again")
+def test_snapshots_moving_code_fence_assemble_to_final_text():
+    # The closing fence "moves down" as lines are added, so no snapshot after
+    # the first is an extension of the previous one.
+    snapshots = ["```py\na\n```", "```py\na\nb\n```", "```py\na\nb\nc\n```"]
+    assert _assemble_from_snapshots(snapshots) == snapshots[-1]
+
+
+def test_snapshots_autoclosed_bold_assembles_to_final_text():
+    # The page auto-closes ** while streaming: "**Hel**" is not a prefix of
+    # the final "**Hello**", yet the joined deltas must equal it exactly.
+    assert _assemble_from_snapshots(["**Hel**", "**Hello**"]) == "**Hello**"
+
+
+def test_snapshots_shrink_then_regrow_without_duplication():
+    snapshots = ["Hello world", "Hello", "Hello world!"]
+    assert _assemble_from_snapshots(snapshots) == "Hello world!"
+
+
+def test_finish_diverging_from_sent_prefix_yields_nothing():
+    deltas = SnapshotDeltas()
+    joined = deltas.feed("Hello world") + deltas.feed("Hello world!")
+    assert joined == "Hello world"
+    # The final text replaced what was already sent: it cannot be retracted,
+    # so finish yields nothing more (the driver logs a warning instead).
+    assert deltas.finish("Goodbye!") is None
+    assert deltas.sent == "Hello world"
+
+
+def test_non_stream_uses_driver_final_text_not_joined_deltas(settings, auth):
+    class FinalTextDriver(ScriptedDriver):
+        async def chat_complete(self, account, req):
+            return "THE FINAL SNAPSHOT"
+
+    driver = FinalTextDriver(["lossy ", "deltas"])
+    with TestClient(create_app(settings, driver)) as c:
+        r = c.post("/v1/chat/completions", headers=auth, json={
+            "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": "hi"}],
+        })
+    assert r.json()["choices"][0]["message"]["content"] == "THE FINAL SNAPSHOT"
 
 
 def test_non_stream_reply_from_delta_upstream_is_exactly_once(scripted, auth):
@@ -183,3 +214,79 @@ def test_stream_yields_true_deltas_and_done(scripted, auth):
               if (d := c["choices"][0]["delta"].get("content"))]
     assert deltas == ["PI", "NE", "APPLE"]
     assert "".join(deltas) == "PINEAPPLE"
+
+
+# ------------------------------------------- browser driver over scripted pages
+
+class _PageSession:
+    """Returns the scripted CHAT_STATE snapshots in order, repeating the last."""
+
+    def __init__(self, texts: list[str]) -> None:
+        self.states = [{"agentCount": 1, "lastText": text, "generating": False,
+                        "tail": "", "attachments": []} for text in texts]
+
+    async def evaluate(self, expr, **_):
+        from muse2api.drivers.browser import dom
+
+        if expr == dom.CHAT_STATE:
+            return self.states.pop(0) if len(self.states) > 1 else self.states[0]
+        return {}
+
+
+@pytest.fixture
+def browser_driver(tmp_path, monkeypatch):
+    import asyncio as _asyncio
+
+    import muse2api.drivers.browser.driver as mod
+    from muse2api.config import Settings
+    from muse2api.drivers.browser.driver import BrowserDriver
+
+    real_sleep = _asyncio.sleep
+    monkeypatch.setattr(mod.asyncio, "sleep", lambda s: real_sleep(0))
+    return BrowserDriver(Settings(_env_file=None, data_dir=tmp_path))
+
+
+def _rig(driver, monkeypatch, texts):
+    from muse2api.drivers.browser.driver import _Tab
+
+    tab = _Tab("a0", "ctx", "t", _PageSession(texts))
+
+    async def fake_begin(account, req):
+        return tab, {"agentCount": 0, "lastText": ""}
+
+    monkeypatch.setattr(driver, "_begin_chat", fake_begin)
+    return tab
+
+
+async def test_browser_stream_moving_fence_joins_to_final(browser_driver, monkeypatch):
+    from muse2api.accounts.model import Account
+    from muse2api.drivers.base import ChatRequest
+
+    snapshots = ["```py\na\n```", "```py\na\nb\n```", "```py\na\nb\nc\n```"]
+    _rig(browser_driver, monkeypatch, snapshots)
+    req = ChatRequest(prompt="x", model="muse-chat")
+    joined = "".join([d async for d in browser_driver.chat_stream(Account(id="a0"), req)])
+    assert joined == snapshots[-1]
+
+
+async def test_browser_complete_returns_final_snapshot_not_stream_join(
+        browser_driver, monkeypatch, caplog):
+    import logging
+
+    from muse2api.accounts.model import Account
+    from muse2api.drivers.base import ChatRequest
+
+    # "Hello world" is stably sent, then the page replaces the reply: the
+    # stream can only keep its prefix (and must warn), while the non-stream
+    # call returns the final snapshot itself.
+    texts = ["Hello world", "Hello world!", "Goodbye!"]
+    _rig(browser_driver, monkeypatch, texts)
+    req = ChatRequest(prompt="x", model="muse-chat")
+    account = Account(id="a0")
+    with caplog.at_level(logging.WARNING, logger="muse2api.drivers.browser.driver"):
+        joined = "".join([d async for d in browser_driver.chat_stream(account, req)])
+    assert joined == "Hello world"
+    assert "diverges from the streamed text" in caplog.text
+
+    _rig(browser_driver, monkeypatch, texts)
+    assert await browser_driver.chat_complete(account, req) == "Goodbye!"

@@ -200,7 +200,14 @@ def _capture_chat_requests(client, monkeypatch) -> list:
         async for d in original(req):
             yield d
 
+    original_complete = gateway.chat_complete
+
+    async def spy_complete(req):
+        seen.append(req)
+        return await original_complete(req)
+
     monkeypatch.setattr(gateway, "chat_stream", spy)
+    monkeypatch.setattr(gateway, "chat_complete", spy_complete)
     return seen
 
 
