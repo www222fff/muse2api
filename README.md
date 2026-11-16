@@ -290,6 +290,15 @@ curl http://localhost:18610/admin/accounts \
 | GET | `/dashboard` | Web dashboard (asks for the admin key in the browser) |
 | POST | `/v1/responses` | Reserved, currently returns 501 |
 
+> **Not supported: function calling.** muse.ai exposes no tool/function-calling
+> controls, so `tools` and `tool_choice` in a chat request are accepted for
+> client compatibility and **ignored**: the model never sees them and responses
+> never contain `tool_calls`. The same applies to sampling parameters
+> (`temperature`, `top_p`, `max_tokens`). System and developer messages *are*
+> honoured: they are folded, in order, into a `<system_instructions>` block at
+> the start of the prompt sent to the muse web chat, which has no native
+> system role.
+
 ### Dashboard, API keys and request log
 
 Open `http://localhost:18610/dashboard` and enter the admin key; it is kept in the browser's local storage and sent as a Bearer token to `/admin/*`. The page shows request volume, error rate and latency, the account pool (enable/disable, renew, reset), a live request log, and API key management.

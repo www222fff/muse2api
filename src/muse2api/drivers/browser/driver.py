@@ -84,6 +84,23 @@ def is_thread_url(url: str) -> bool:
     return path.startswith("/thread/") and path != "/thread/new"
 
 
+def snapshot_delta(emitted: str, current: str) -> str:
+    """The part of a cumulative page snapshot that has not been emitted yet.
+
+    The page reports the reply-so-far in full on every poll, and its rendering
+    is not prefix-stable (a growing bubble re-wraps, moving line breaks), so a
+    strict prefix check re-sends the whole text whenever an early character
+    shifts. Diffing on the longest common prefix re-sends at most the
+    divergent tail, and for snapshots that only grow it yields exactly the
+    new suffix, so joining the deltas reproduces the final text once.
+    """
+    limit = min(len(emitted), len(current))
+    i = 0
+    while i < limit and emitted[i] == current[i]:
+        i += 1
+    return current[i:]
+
+
 @dataclass
 class _Tab:
     account_id: str
@@ -587,9 +604,9 @@ class BrowserDriver(MuseDriver):
                     continue
                 got_first = True
                 if text != last:
-                    delta = text[len(emitted):] if text.startswith(emitted) else text
+                    delta = snapshot_delta(emitted, text)
+                    emitted = text
                     if delta:
-                        emitted = text
                         yield delta
                     last, stable = text, 0
                 else:

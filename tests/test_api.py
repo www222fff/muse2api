@@ -240,8 +240,8 @@ def test_responses_items_and_instructions(client, auth, monkeypatch):
                   {"type": "message", "role": "assistant", "content": "noon"},
                   {"role": "user", "content": "and date"}]})
     assert r.status_code == 200
-    # instructions folded in as a System block, turns preserved.
-    assert "[System]\nbe terse" in seen[0].prompt
+    # instructions folded in as the leading system-instructions block, turns preserved.
+    assert seen[0].prompt.startswith("<system_instructions>\nbe terse\n</system_instructions>")
     assert seen[0].turns[0] == ("system", "be terse")
 
 
