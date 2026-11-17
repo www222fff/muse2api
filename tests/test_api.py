@@ -110,7 +110,7 @@ def test_image_opaque_background_skips_matting(client, auth, monkeypatch):
     assert r.json()["data"][0]["revised_prompt"] == "a fox"
 
 
-def _capture_image_requests(client, monkeypatch):
+def _capture_image_requests(client, monkeypatch):  # type: ignore[redeclaration]
     seen = []
     gateway = client.app.state.services.gateway
     original = gateway.generate_image
@@ -169,8 +169,8 @@ def test_image_async_task(client, auth):
         if view["status"] == "succeeded":
             break
         time.sleep(0.02)
-    assert view["status"] == "succeeded"
-    url = view["result"]["data"][0]["url"]  # async results are always stored as media URLs
+    assert view["status"] == "succeeded"  # type: ignore[possibly-unbound]
+    url = view["result"]["data"][0]["url"]  # async results are always stored as media URLs  # type: ignore[possibly-unbound]
     media = client.get(url.split("http://testserver", 1)[-1], headers=auth)
     assert media.status_code == 200 and media.headers["content-type"] == "image/png"
 
@@ -187,8 +187,8 @@ def test_video_task(client, auth):
         if task["status"] in ("succeeded", "failed"):
             break
         time.sleep(0.02)
-    assert task["status"] == "succeeded", task
-    assert task["result"]["url"].endswith(".mp4")
+    assert task["status"] == "succeeded", task  # type: ignore[possibly-unbound]
+    assert task["result"]["url"].endswith(".mp4")  # type: ignore[possibly-unbound]
 
 
 def _capture_chat_requests(client, monkeypatch) -> list:
@@ -538,9 +538,9 @@ async def test_browser_set_cookies_host_prefix_uses_url():
             sent.append((method, params))
 
     acc = Account(cookies={"hatch_sess": "s", "__Host-hatch_one_tap": "t"})
-    await BrowserDriver._set_cookies(FakeSession(), acc)
-    by_name = {p["name"]: p for _, p in sent}
-    assert by_name["hatch_sess"]["domain"] == ".muse.ai"
-    host = by_name["__Host-hatch_one_tap"]
-    assert "domain" not in host
-    assert host["url"] == "https://muse.ai/" and host["path"] == "/" and host["secure"]
+    await BrowserDriver._set_cookies(FakeSession(), acc)  # type: ignore[arg-type]
+    by_name = {p["name"]: p for _, p in sent}  # type: ignore[unsupported-operation]
+    assert by_name["hatch_sess"]["domain"] == ".muse.ai"  # type: ignore[unsupported-operation]
+    host = by_name["__Host-hatch_one_tap"]  # type: ignore[unsupported-operation]
+    assert "domain" not in host  # type: ignore[not-iterable]
+    assert host["url"] == "https://muse.ai/" and host["path"] == "/" and host["secure"]  # type: ignore[unsupported-operation]

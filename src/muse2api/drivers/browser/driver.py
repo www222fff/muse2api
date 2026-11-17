@@ -21,7 +21,7 @@ import os
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal, cast
 from urllib.parse import urlsplit
 
 from ...accounts.model import Account
@@ -145,8 +145,8 @@ class BrowserDriver(MuseDriver):
     async def shutdown(self) -> None:
         for task in self._warming.values():
             task.cancel()
-        for tabs in list(self._tabs.values()):
-            for tab in list(tabs):
+        for tabs in self._tabs.values():
+            for tab in tabs:
                 await self._close_tab(tab)
         if self._browser:
             await self._browser.close()
@@ -160,6 +160,21 @@ class BrowserDriver(MuseDriver):
                 "busy_tabs": sum(t.busy for t in tabs)}
 
     # ------------------------------------------------------------ tabs
+    def _claim_or_plan(self, account: Account, tabs: list[_Tab], limit: int,
+                       prefer: Callable[[_Tab], bool] | None) -> tuple[_Tab | None, bool]:
+        """Return (tab to use, or None; whether to open a fresh tab)."""
+        idle = sorted((t for t in tabs if not t.busy), key=lambda t: not t.warm)
+        can_open = len(tabs) + self._opening.get(account.id, 0) < limit
+        match = next((t for t in idle if prefer is None or prefer(t)), None)
+        if match or (idle and not can_open):
+            tab = match or next((t for t in idle if not t.has_state), idle[0])
+            tab.busy = True
+            return tab, False
+        if can_open:
+            self._opening[account.id] = self._opening.get(account.id, 0) + 1
+            return None, True
+        return None, False
+
     async def _checkout(self, account: Account,
                         prefer: Callable[[_Tab], bool] | None = None) -> _Tab:
         """Reserve an idle tab of ``account``, opening a new one while under the
@@ -168,6 +183,7 @@ class BrowserDriver(MuseDriver):
         Pair every call with ``_checkin``."""
         limit = max(1, self.settings.account_max_concurrency)
         dead: list[_Tab] = []
+        tab: _Tab | None = None
         async with self._tab_cond:
             while True:
                 tabs = self._tabs.setdefault(account.id, [])
@@ -175,17 +191,8 @@ class BrowserDriver(MuseDriver):
                           if t.closed or (not t.busy and (t.stale or t.session.closed))]:
                     tabs.remove(t)
                     dead.append(t)
-                # A warm tab first: whoever needs a new thread gets a started one.
-                idle = sorted((t for t in tabs if not t.busy), key=lambda t: not t.warm)
-                can_open = len(tabs) + self._opening.get(account.id, 0) < limit
-                match = next((t for t in idle if prefer is None or prefer(t)), None)
-                if match or (idle and not can_open):
-                    tab = match or next((t for t in idle if not t.has_state), idle[0])
-                    tab.busy = True
-                    break
-                if can_open:
-                    self._opening[account.id] = self._opening.get(account.id, 0) + 1
-                    tab = None
+                tab, to_open = self._claim_or_plan(account, tabs, limit, prefer)
+                if tab is not None or to_open:
                     break
                 # The pool caps requests per account, so this only waits out a tab
                 # that is still being closed.
@@ -203,6 +210,8 @@ class BrowserDriver(MuseDriver):
                     tab.busy = True
                     self._tabs.setdefault(account.id, []).append(tab)
                 self._tab_cond.notify_all()
+        if tab is None:
+            raise UpstreamError(f"failed to open a tab for account {account.id}")
         log.info("opened tab %d for account %s", len(self._tabs[account.id]), account.id)
         return tab
 
@@ -218,26 +227,49 @@ class BrowserDriver(MuseDriver):
         async with self._tab_cond:
             self._tab_cond.notify_all()
 
+    async def _ensure_browser(self) -> CDPSession:
+        if self._browser is not None and not self._browser.closed:
+            return self._browser
+        log.info("reconnecting browser / CDP session...")
+        assert self._chromium
+        ws_url = await self._chromium.start()
+        self._browser = await CDPSession.connect(ws_url)
+        self._contexts.clear()
+        return self._browser
+
     async def _context(self, account: Account) -> str:
         async with self._ctx_lock:
+            browser = await self._ensure_browser()
             if ctx := self._contexts.get(account.id):
                 return ctx
-            assert self._browser
-            res = await self._browser.send("Target.createBrowserContext", {"disposeOnDetach": False})
+            try:
+                res = await browser.send("Target.createBrowserContext", {"disposeOnDetach": False})
+            except Exception:
+                browser = await self._ensure_browser()
+                res = await browser.send("Target.createBrowserContext", {"disposeOnDetach": False})
             self._contexts[account.id] = res["browserContextId"]
             return res["browserContextId"]
 
     async def _open_tab(self, account: Account) -> _Tab:
         if missing := muse.missing_session_cookies(account.cookies):
             raise UpstreamAuthError(f"account is missing session cookies: {', '.join(missing)}")
-        assert self._browser and self._chromium
+        browser = await self._ensure_browser()
+        assert self._chromium
         context_id = await self._context(account)
         # A window per tab: Chromium throttles background tabs of a shared window,
         # which made parallel requests on one account run one after another.
-        target = await self._browser.send(
-            "Target.createTarget",
-            {"url": "about:blank", "browserContextId": context_id, "newWindow": True},
-        )
+        try:
+            target = await browser.send(
+                "Target.createTarget",
+                {"url": "about:blank", "browserContextId": context_id, "newWindow": True},
+            )
+        except Exception:
+            browser = await self._ensure_browser()
+            context_id = await self._context(account)
+            target = await browser.send(
+                "Target.createTarget",
+                {"url": "about:blank", "browserContextId": context_id, "newWindow": True},
+            )
         target_id = target["targetId"]
         session = await CDPSession.connect(
             f"ws://127.0.0.1:{self._chromium.port}/devtools/page/{target_id}"
@@ -328,7 +360,7 @@ class BrowserDriver(MuseDriver):
         if url:
             tab.thread_url = url
         tab.hint = req.conversation_hint
-        tab.turns = list(req.turns)
+        tab.turns = req.turns
         tab.image_count = len(req.images)
         account.meta["hot_page"] = {
             "hint": req.conversation_hint or "",
@@ -497,8 +529,8 @@ class BrowserDriver(MuseDriver):
                 return
         raise UpstreamTimeout("saved conversation did not become ready")
 
-    async def _begin_chat(self, account: Account, req: ChatRequest):
-        """Send ``req`` on the saved conversation when it continues that page."""
+    async def _pick_chat_tab(self, account: Account, req: ChatRequest) -> _Tab:
+        """Select a tab for the request: named conversations reuse their tab."""
         hint = req.conversation_hint or ""
         if hint:
             # A named conversation reuses the tab already holding it; a new one takes
@@ -507,45 +539,66 @@ class BrowserDriver(MuseDriver):
                 return t.has_state and (t.hint or "") == hint
 
             has_own = any(owned(t) for t in self._tabs.get(account.id, []))
-            tab = await self._checkout(account, prefer=owned if has_own else (lambda t: owned(t) or t.warm))
+            return await self._checkout(
+                account, prefer=owned if has_own else (lambda t: owned(t) or t.warm))
+        # No identity (no `user` field): never latch onto a tab another
+        # anonymous request was using, or two clients without `user`
+        # would share one thread. Prefer a fresh/stateless tab instead.
+        return await self._checkout(account, prefer=lambda t: not t.has_state)
+
+    async def _open_fresh_thread(self, tab: _Tab, account: Account, hint: str) -> None:
+        """Drop any stale hot-page hint and start a new thread on ``tab``."""
+        saved = account.meta.get("hot_page")
+        if isinstance(saved, dict) and (saved.get("hint") or "") == hint:
+            account.meta.pop("hot_page", None)
+        if tab.warm:
+            log.info("using a warm thread")
+            self._forget(tab)
         else:
-            # No identity (no `user` field): never latch onto a tab another
-            # anonymous request was using, or two clients without `user`
-            # would share one thread. Prefer a fresh/stateless tab instead.
-            tab = await self._checkout(account, prefer=lambda t: not t.has_state)
-        prompt, images = req.prompt, req.images
+            log.info("opening a new thread")
+            await self._new_thread(tab)
+
+    async def _continue_existing_thread(self, tab: _Tab, follow: str,
+                                        images: list[InputImage]) -> tuple[str, list[InputImage]] | None:
+        """Continue the tab's thread when usable; else return None to open fresh."""
+        if await self._on_thread(tab) or await self._live_continuation(tab):
+            log.info("reusing hot page %s", tab.thread_url or "open page")
+            return follow, images[tab.image_count:]
+        if tab.thread_url:
+            log.info("reopening %s", tab.thread_url)
+            await self._open_saved(tab)
+            return follow, images[tab.image_count:]
+        return None
+
+    async def _resolve_thread(self, tab: _Tab, account: Account, req: ChatRequest,
+                              hint: str) -> tuple[str, list[InputImage]]:
+        """Decide whether to continue the tab's thread or open a fresh one."""
+        # The saved conversation (restored after a restart) may only go into a
+        # tab while no other tab of the account already holds a conversation.
+        if hint and not any(t.has_state for t in self._tabs.get(account.id, []) if t is not tab):
+            self._load_hot(tab, account)
+        # An anonymous request never continues a thread, even if the tab
+        # it got (e.g. the at-limit fallback, or a restored hot page)
+        # happens to hold one: without an identity there is no way to
+        # know it is the same client. It opens a new thread instead and
+        # sends the full prompt, which keeps the model in context.
+        same_owner = bool(hint) and (tab.hint or "") == hint
+        follow = followup_text(tab.turns, req.turns) if tab.turns and same_owner else None
+        if follow and len(req.images) >= tab.image_count and (
+            tab.thread_url or await self._live_continuation(tab)
+        ):
+            continued = await self._continue_existing_thread(tab, follow, req.images)
+            if continued is not None:
+                return continued
+        await self._open_fresh_thread(tab, account, hint)
+        return req.prompt, req.images
+
+    async def _begin_chat(self, account: Account, req: ChatRequest):
+        """Send ``req`` on the saved conversation when it continues that page."""
+        hint = req.conversation_hint or ""
+        tab = await self._pick_chat_tab(account, req)
         try:
-            # The saved conversation (restored after a restart) may only go into a
-            # tab while no other tab of the account already holds a conversation.
-            if hint and not any(t.has_state for t in self._tabs.get(account.id, []) if t is not tab):
-                self._load_hot(tab, account)
-            # An anonymous request never continues a thread, even if the tab
-            # it got (e.g. the at-limit fallback, or a restored hot page)
-            # happens to hold one: without an identity there is no way to
-            # know it is the same client. It opens a new thread instead and
-            # sends the full prompt, which keeps the model in context.
-            same_owner = bool(hint) and (tab.hint or "") == hint
-            follow = followup_text(tab.turns, req.turns) if tab.turns and same_owner else None
-            if follow and len(req.images) >= tab.image_count and (
-                tab.thread_url or await self._live_continuation(tab)
-            ):
-                if await self._on_thread(tab) or await self._live_continuation(tab):
-                    log.info("reusing hot page %s", tab.thread_url or "open page")
-                elif tab.thread_url:
-                    log.info("reopening %s", tab.thread_url)
-                    await self._open_saved(tab)
-                prompt = follow
-                images = req.images[tab.image_count:]
-            else:
-                saved = account.meta.get("hot_page")
-                if isinstance(saved, dict) and (saved.get("hint") or "") == hint:
-                    account.meta.pop("hot_page", None)
-                if tab.warm:
-                    log.info("using a warm thread")
-                    self._forget(tab)
-                else:
-                    log.info("opening a new thread")
-                    await self._new_thread(tab)
+            prompt, images = await self._resolve_thread(tab, account, req, hint)
             base = await self._state(tab)
             await self._attach(tab, images)
             await self._send(tab, prompt)
@@ -559,66 +612,109 @@ class BrowserDriver(MuseDriver):
             await self._checkin(tab)
             raise
 
+    def _enforce_stream_deadlines(self, req: ChatRequest, elapsed: float,
+                                  got_first: bool) -> None:
+        """Raise when the stream exceeds the overall or first-token deadlines."""
+        if elapsed > req.timeout:
+            raise UpstreamTimeout("assistant reply timed out")
+        if not got_first and elapsed > req.first_token_timeout:
+            raise UpstreamTimeout("no first token from assistant")
+
+    @staticmethod
+    def _raise_if_stalled(elapsed: float, st: dict) -> None:
+        """Raise when the upstream workspace is stuck connecting."""
+        if elapsed > STALL_GIVE_UP and any(h in st.get("tail", "") for h in dom.STALL_HINTS):
+            raise UpstreamTimeout("upstream workspace is stuck connecting")
+
+    @staticmethod
+    def _stream_settled(st: dict, stable: int) -> bool:
+        """True when the reply has been stable long enough to finalise."""
+        return (not st.get("generating") and stable >= STABLE_POLLS_DONE) or stable >= STABLE_POLLS_FORCE
+
+    async def _finish_stream(self, tab: _Tab, account: Account, req: ChatRequest,
+                             finished: bool) -> None:
+        """Persist/release the tab after the stream ends."""
+        # Only a named conversation is kept: an anonymous one can never be
+        # continued, so holding it would just keep the tab from counting as fresh.
+        if finished and req.conversation_hint:
+            url = ""
+            for _ in range(10):
+                url = await self._href(tab)
+                if is_thread_url(url):
+                    break
+                await asyncio.sleep(0.2)
+            self._save_hot(tab, account, req, url if is_thread_url(url) else "")
+            if tab.thread_url:
+                log.info("saved hot page %s", tab.thread_url)
+            else:
+                log.info("reply finished but the thread url was not ready yet")
+        else:
+            self._forget(tab)
+        await self._checkin(tab)
+        self.prewarm(account)
+
+    @dataclass
+    class _StreamState:
+        """Mutable polling state shared across stream iterations."""
+        base_count: int
+        base_text: str
+        started: float
+        emitted: str = ""
+        last: str | None = None
+        stable: int = 0
+        got_first: bool = False
+
+    async def _poll_stream(self, tab: _Tab, req: ChatRequest,
+                           state: _StreamState) -> tuple[_StreamState, bool, str | None]:
+        """Poll the tab once; returns (state, finished, delta)."""
+        if req.cancel and req.cancel.is_set():
+            return state, True, None
+        elapsed = time.monotonic() - state.started
+        self._enforce_stream_deadlines(req, elapsed, state.got_first)
+        await asyncio.sleep(POLL_INTERVAL)
+        st = await self._state(tab)
+        if st.get("approval"):
+            await self._deny_approvals(tab)
+            return state, False, None
+        text = st.get("lastText", "")
+        is_new = st.get("agentCount", 0) > state.base_count or (text and text != state.base_text)
+        if not is_new or not text:
+            self._raise_if_stalled(elapsed, st)
+            return state, False, None
+        if text != state.last:
+            previous = state.emitted
+            state.emitted = text
+            state.last = text
+            state.stable = 0
+            state.got_first = True
+            delta = text[len(previous):] if text.startswith(previous) else text
+            return state, False, delta
+        state.stable += 1
+        state.got_first = True
+        if self._stream_settled(st, state.stable):
+            return state, True, None
+        return state, False, None
+
     async def chat_stream(self, account: Account, req: ChatRequest) -> AsyncIterator[str]:
         tab, base = await self._begin_chat(account, req)
-        base_count, base_text = base.get("agentCount", 0), base.get("lastText", "")
-        started = time.monotonic()
-        emitted, last, stable, got_first = "", None, 0, False
+        state = self._StreamState(
+            base_count=base.get("agentCount", 0),
+            base_text=base.get("lastText", ""),
+            started=time.monotonic(),
+        )
         finished = False
         try:
             while True:
-                if req.cancel and req.cancel.is_set():
+                state, finished, delta = await self._poll_stream(tab, req, state)
+                if finished:
                     return
-                elapsed = time.monotonic() - started
-                if elapsed > req.timeout:
-                    raise UpstreamTimeout("assistant reply timed out")
-                if not got_first and elapsed > req.first_token_timeout:
-                    raise UpstreamTimeout("no first token from assistant")
-                await asyncio.sleep(POLL_INTERVAL)
-                st = await self._state(tab)
-                if st.get("approval"):
-                    await self._deny_approvals(tab)
-                    continue
-                text = st.get("lastText", "")
-                is_new = st.get("agentCount", 0) > base_count or (text and text != base_text)
-                if not is_new or not text:
-                    if elapsed > STALL_GIVE_UP and any(h in st.get("tail", "") for h in dom.STALL_HINTS):
-                        raise UpstreamTimeout("upstream workspace is stuck connecting")
-                    continue
-                got_first = True
-                if text != last:
-                    delta = text[len(emitted):] if text.startswith(emitted) else text
-                    if delta:
-                        emitted = text
-                        yield delta
-                    last, stable = text, 0
-                else:
-                    stable += 1
-                    if (not st.get("generating") and stable >= STABLE_POLLS_DONE) or stable >= STABLE_POLLS_FORCE:
-                        finished = True
-                        return
+                if delta:
+                    yield delta
         except CDPError as exc:
             await self._close_tab(tab)
             raise UpstreamError(f"browser error: {exc}") from exc
         finally:
-            # Only a named conversation is kept: an anonymous one can never be
-            # continued, so holding it would just keep the tab from counting as fresh.
-            if finished and req.conversation_hint:
-                url = ""
-                for _ in range(10):
-                    url = await self._href(tab)
-                    if is_thread_url(url):
-                        break
-                    await asyncio.sleep(0.2)
-                self._save_hot(tab, account, req, url if is_thread_url(url) else "")
-                if tab.thread_url:
-                    log.info("saved hot page %s", tab.thread_url)
-                else:
-                    log.info("reply finished but the thread url was not ready yet")
-            else:
-                self._forget(tab)
-            await self._checkin(tab)
-            self.prewarm(account)
+            await self._finish_stream(tab, account, req, finished)
 
     # ------------------------------------------------------------ warm threads
     _WARM_REPLY_TIMEOUT = 90.0
@@ -657,7 +753,7 @@ class BrowserDriver(MuseDriver):
     async def _warm_one(self, account: Account, tab: _Tab) -> bool:
         try:
             await self._warm_up(tab)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._forget(tab)
             if isinstance(exc, CDPError):
                 await self._close_tab(tab)
@@ -726,17 +822,86 @@ class BrowserDriver(MuseDriver):
     # a minute later, and the failover started the whole generation over.
     _OVERRUN_FACTOR = 2.5
 
+    async def _text_only_action(self, tab: _Tab, kind: str, text: str,
+                                grace: float, denied: bool, asked: bool) -> tuple[str, str | None]:
+        """Handle a text-only reply: ask once, then probe for a link, else refuse."""
+        if not asked:
+            # The agent often finishes with the file only in its workspace:
+            # after a denied upload, after post-processing that it shows as
+            # an image gallery (raw, QC crops and final mixed together), or
+            # when it recognises a repeat request and points at the earlier
+            # file. Asking once gets the final file attached in chat.
+            log.info("%s not attached (%s); asking for it in chat: %.120s", kind,
+                     "denied approval" if denied else "text-only reply", text)
+            await self._send(tab, f"Please attach the final {kind} file here in "
+                                  "the chat" + (" instead of uploading it." if denied
+                                                else ", as a single attachment."))
+            return "ask", None
+        probe = await tab.session.evaluate(dom.LAST_BUBBLE_MEDIA) or {}
+        url = self._pick_media_url(probe.get("links", []), kind)
+        if url:
+            log.info("%s delivered as link in text bubble: %s", kind, url)
+            return "link", url
+        log.info("%s: no media after %.0fs grace; links=%s html=%.300s",
+                 kind, grace, probe.get("links", []), probe.get("html", ""))
+        return "refuse", text
+
+    async def _settle_text_only(self, tab: _Tab, st: dict, kind: str,
+                                ctx: dict) -> tuple[str, dict | None]:
+        """Wait out text-only replies; ask once, then probe links or refuse."""
+        text = st.get("lastText", "")
+        if not (st.get("agentCount", 0) > ctx["base_count"] and text
+                and not st.get("generating")):
+            ctx["text_done_at"] = None
+            return "continue", None
+        now = time.monotonic()
+        if ctx["text_done_at"] is None:
+            ctx["text_done_at"] = now
+            return "continue", None
+        if now - ctx["text_done_at"] < ctx["grace"]:
+            return "continue", None
+        action, payload = await self._text_only_action(
+            tab, kind, text, ctx["grace"], ctx["denied"], ctx["asked"])
+        if action == "ask":
+            ctx["asked"] = True
+            ctx["text_done_at"] = None
+            ctx["base_count"] = st.get("agentCount", 0)
+            return "continue", None
+        if action == "link":
+            return "link", {"src": payload, "kind": kind}
+        raise UpstreamRefused(f"upstream replied with text only: {text[:200]}")
+
+    async def _step_media(self, tab: _Tab, st: dict, kind: str,
+                          ctx: dict) -> tuple[str, dict | None]:
+        """Advance one media-wait iteration; returns (action, payload)."""
+        new_atts = st.get("attachments", [])[ctx["base_atts"]:]
+        fresh = [a for a in new_atts if a.get("src") and a.get("kind") == kind]
+        if fresh:
+            return "fresh", fresh[-1]
+        ctx["busy"] = bool(st.get("generating")) or any(
+            kind in (a.get("tid") or "") for a in new_atts)
+        # An attachment node for this kind is on the page but its (blob) src
+        # has not loaded yet -> media is still finalising, keep waiting.
+        if any(kind in (a.get("tid") or "") for a in new_atts):
+            ctx["text_done_at"] = None
+            return "continue", None
+        return await self._settle_text_only(tab, st, kind, ctx)
+
     async def _wait_media(self, tab: _Tab, base: dict, kind: str, timeout: float,
                           on_progress, cancel: asyncio.Event | None) -> dict:
-        base_atts = len(base.get("attachments", []))
-        base_count = base.get("agentCount", 0)
-        grace = self._MEDIA_GRACE.get(kind, 8.0)
+        ctx = {
+            "base_atts": len(base.get("attachments", [])),
+            "base_count": base.get("agentCount", 0),
+            "grace": self._MEDIA_GRACE.get(kind, 8.0),
+            "denied": False,
+            "asked": False,
+            "text_done_at": None,
+            "busy": False,
+        }
         started = time.monotonic()
-        text_done_at: float | None = None
-        denied = asked_to_attach = busy = False
         while True:
             elapsed = time.monotonic() - started
-            if elapsed >= timeout and not (busy and elapsed < timeout * self._OVERRUN_FACTOR):
+            if elapsed >= timeout and not (ctx["busy"] and elapsed < timeout * self._OVERRUN_FACTOR):
                 break
             if cancel and cancel.is_set():
                 raise asyncio.CancelledError
@@ -744,54 +909,14 @@ class BrowserDriver(MuseDriver):
             st = await self._state(tab)
             if st.get("approval"):
                 await self._deny_approvals(tab)
-                denied, text_done_at = True, None
+                ctx["denied"], ctx["text_done_at"] = True, None
                 continue
-            new_atts = st.get("attachments", [])[base_atts:]
-            fresh = [a for a in new_atts if a.get("src") and a.get("kind") == kind]
-            if fresh:
-                return fresh[-1]
-            busy = bool(st.get("generating")) or any(kind in (a.get("tid") or "") for a in new_atts)
-            elapsed = time.monotonic() - started
             if on_progress:
                 on_progress(min(95, int(elapsed / timeout * 100)))
-            # An attachment node for this kind is on the page but its (blob) src
-            # has not loaded yet -> media is still finalising, keep waiting.
-            if any(kind in (a.get("tid") or "") for a in new_atts):
-                text_done_at = None
-                continue
-            # No attachment yet. The reply may be genuinely text-only (a refusal),
-            # or the attachment may simply lag the completion sentence.
-            text = st.get("lastText", "")
-            if st.get("agentCount", 0) > base_count and text and not st.get("generating"):
-                if text_done_at is None:
-                    text_done_at = time.monotonic()
-                elif time.monotonic() - text_done_at >= grace:
-                    if not asked_to_attach:
-                        # The agent often finishes with the file only in its workspace:
-                        # after a denied upload, after post-processing that it shows as
-                        # an image gallery (raw, QC crops and final mixed together), or
-                        # when it recognises a repeat request and points at the earlier
-                        # file. Asking once gets the final file attached in chat.
-                        log.info("%s not attached (%s); asking for it in chat: %.120s", kind,
-                                 "denied approval" if denied else "text-only reply", text)
-                        await self._send(tab, f"Please attach the final {kind} file here in "
-                                              "the chat" + (" instead of uploading it." if denied
-                                                            else ", as a single attachment."))
-                        asked_to_attach, text_done_at = True, None
-                        base_count = st.get("agentCount", 0)
-                        continue
-                    # Last resort: media delivered as a link in the text bubble.
-                    probe = await tab.session.evaluate(dom.LAST_BUBBLE_MEDIA) or {}
-                    url = self._pick_media_url(probe.get("links", []), kind)
-                    if url:
-                        log.info("%s delivered as link in text bubble: %s", kind, url)
-                        return {"src": url, "kind": kind}
-                    log.info("%s: no media after %.0fs grace; links=%s html=%.300s",
-                             kind, grace, probe.get("links", []), probe.get("html", ""))
-                    raise UpstreamRefused(f"upstream replied with text only: {text[:200]}")
-            else:
-                text_done_at = None
-        if busy:
+            outcome, payload = await self._step_media(tab, st, kind, ctx)
+            if outcome in ("fresh", "link"):
+                return payload  # type: ignore[return-value]  # payload non-None for these outcomes
+        if ctx["busy"]:
             log.warning("%s still generating after %.0fs; giving up", kind, elapsed)
         raise UpstreamTimeout(f"{kind} generation timed out")
 
@@ -828,7 +953,8 @@ class BrowserDriver(MuseDriver):
         if not (res or {}).get("ok"):
             raise UpstreamError(f"failed to download generated {kind}: {(res or {}).get('err')}")
         mime = res.get("mime") or ("video/mp4" if kind == "video" else "image/png")
-        return MediaResult(data=base64.b64decode(res["b64"]), mime=mime, kind=kind,
+        media_kind = cast(Literal["image", "video"], kind)
+        return MediaResult(data=base64.b64decode(res["b64"]), mime=mime, kind=media_kind,
                            width=att.get("w") or None, height=att.get("h") or None)
 
     async def _generate(self, account: Account, prompt: str, images: list[InputImage],
@@ -881,7 +1007,7 @@ class BrowserDriver(MuseDriver):
         # Otherwise retire the account's tabs so new ones load the rotated cookies; a
         # tab in the middle of a request is closed when it is checked back in.
         async with self._tab_cond:
-            tabs = list(self._tabs.get(account.id, []))
+            tabs = self._tabs.get(account.id, [])
             for tab in tabs:
                 tab.stale = True
             idle = [t for t in tabs if not t.busy]
@@ -992,7 +1118,7 @@ class BrowserDriver(MuseDriver):
                 await self._escape(tab)
                 if await tab.session.evaluate(dom.QUOTA_DIALOG_TEXT):
                     tab.stale = True
-            except Exception:  # noqa: BLE001
+            except Exception:
                 tab.stale = True
             if tab.stale:
                 log.warning("settings dialog stayed open on a tab of %s; retiring it",

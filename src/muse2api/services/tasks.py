@@ -96,7 +96,7 @@ class TaskManager:
 
     async def _run(self, task: Task, runner: Runner) -> None:
         def progress(p: int) -> None:
-            task.progress = max(task.progress, min(99, int(p)))
+            task.progress = max(task.progress, min(99, p))
             task.updated_at = time.time()
 
         task.status = TaskStatus.RUNNING
@@ -109,7 +109,7 @@ class TaskManager:
         except Muse2APIError as exc:
             task.status = TaskStatus.FAILED
             task.error = {"message": exc.message, "code": exc.code}
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("task %s crashed", task.id)
             task.status = TaskStatus.FAILED
             task.error = {"message": str(exc), "code": "internal_error"}
@@ -120,7 +120,7 @@ class TaskManager:
             if self.on_finish:
                 try:
                     await self.on_finish(task)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     log.exception("on_finish hook failed for task %s", task.id)
 
     async def cancel(self, task_id: str) -> bool:

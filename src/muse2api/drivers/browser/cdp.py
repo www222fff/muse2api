@@ -37,24 +37,31 @@ class CDPSession:
     def closed(self) -> bool:
         return self._reader.done()
 
+    def _resolve_pending(self, msg: dict) -> None:
+        fut = self._pending.pop(msg["id"], None)
+        if not fut or fut.done():
+            return
+        if "error" in msg:
+            fut.set_exception(CDPError(msg["error"].get("message", "cdp error")))
+        else:
+            fut.set_result(msg.get("result", {}))
+
+    def _dispatch_event(self, method: str, msg: dict) -> None:
+        for cb in self._listeners.get(method, ()):
+            try:
+                cb(msg.get("params", {}))
+            except Exception:
+                log.exception("cdp listener for %s failed", method)
+
     async def _read_loop(self) -> None:
         try:
             async for raw in self._ws:
                 msg = json.loads(raw)
                 if "id" in msg:
-                    fut = self._pending.pop(msg["id"], None)
-                    if fut and not fut.done():
-                        if "error" in msg:
-                            fut.set_exception(CDPError(msg["error"].get("message", "cdp error")))
-                        else:
-                            fut.set_result(msg.get("result", {}))
+                    self._resolve_pending(msg)
                 elif method := msg.get("method"):
-                    for cb in self._listeners.get(method, ()):
-                        try:
-                            cb(msg.get("params", {}))
-                        except Exception:  # noqa: BLE001
-                            log.exception("cdp listener for %s failed", method)
-        except Exception as exc:  # noqa: BLE001
+                    self._dispatch_event(method, msg)
+        except Exception as exc:
             log.debug("cdp reader stopped: %s", exc)
         finally:
             for fut in self._pending.values():

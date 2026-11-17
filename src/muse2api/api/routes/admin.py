@@ -10,7 +10,7 @@ import io
 import time
 import zipfile
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import Response
@@ -31,6 +31,37 @@ EXTENSION_DIR = Path(__file__).resolve().parents[2] / "web" / "extension"
 """Unpacked Chrome extension that imports muse.ai cookies into this gateway."""
 
 
+def _parse_cookie_header(value: str) -> dict[str, str]:
+    """Parse a raw ``Cookie`` header string into a name -> value dict."""
+    cookies: dict[str, str] = {}
+    for part in value.split(";"):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        name, _, val = part.partition("=")
+        name = name.strip()
+        if name:
+            cookies[name] = val.strip()
+    return cookies
+
+
+def _parse_cookie_list(value: list[dict]) -> tuple[dict[str, str], dict[str, int]]:
+    """Parse a cookie-export list into ``(cookies, cookie_expires)``."""
+    cookies, expires = {}, {}
+    for i, entry in enumerate(value):
+        if not isinstance(entry, dict) or not entry.get("name"):
+            raise InvalidRequest(f"cookies[{i}] must be an object with 'name' and 'value'")
+        name = str(entry["name"])
+        cookies[name] = str(entry.get("value", ""))
+        exp = entry.get("expirationDate")
+        if exp is not None:
+            try:
+                expires[name] = int(float(exp))
+            except (TypeError, ValueError):
+                raise InvalidRequest(f"cookies[{i}].expirationDate is not a number") from None
+    return cookies, expires
+
+
 def parse_cookies(value: dict[str, str] | str | list[dict]) -> tuple[dict[str, str], dict[str, int]]:
     """Normalise the three cookie import formats into ``(cookies, cookie_expires)``.
 
@@ -40,30 +71,9 @@ def parse_cookies(value: dict[str, str] | str | list[dict]) -> tuple[dict[str, s
     if isinstance(value, dict):
         return dict(value), {}
     if isinstance(value, str):
-        cookies: dict[str, str] = {}
-        for part in value.split(";"):
-            part = part.strip()
-            if not part or "=" not in part:
-                continue
-            name, _, val = part.partition("=")
-            name = name.strip()
-            if name:
-                cookies[name] = val.strip()
-        return cookies, {}
+        return _parse_cookie_header(value), {}
     if isinstance(value, list):
-        cookies, expires = {}, {}
-        for i, entry in enumerate(value):
-            if not isinstance(entry, dict) or not entry.get("name"):
-                raise InvalidRequest(f"cookies[{i}] must be an object with 'name' and 'value'")
-            name = str(entry["name"])
-            cookies[name] = str(entry.get("value", ""))
-            exp = entry.get("expirationDate")
-            if exp is not None:
-                try:
-                    expires[name] = int(float(exp))
-                except (TypeError, ValueError):
-                    raise InvalidRequest(f"cookies[{i}].expirationDate is not a number") from None
-        return cookies, expires
+        return _parse_cookie_list(value)
     raise InvalidRequest("cookies must be a dict, a raw 'Cookie' header string, or a cookie-export list")
 
 
@@ -86,7 +96,7 @@ def _get(svc: Services, account_id: str) -> Account:
 
 
 @router.get("/status")
-async def status(svc: Services = Depends(get_services)) -> dict:
+async def status(svc: Annotated[Services, Depends(get_services)]) -> dict:
     return {
         "version": __version__,
         "driver": await svc.driver.health(),
@@ -96,12 +106,12 @@ async def status(svc: Services = Depends(get_services)) -> dict:
 
 
 @router.get("/accounts")
-async def list_accounts(svc: Services = Depends(get_services)) -> dict:
+async def list_accounts(svc: Annotated[Services, Depends(get_services)]) -> dict:
     return {"data": [a.public() for a in svc.pool.all()]}
 
 
 @router.post("/accounts")
-async def create_account(body: AccountCreate, svc: Services = Depends(get_services)) -> dict:
+async def create_account(body: AccountCreate, svc: Annotated[Services, Depends(get_services)]) -> dict:
     acc = _build_account(body)
     await svc.pool.upsert(acc)
     return {"account": acc.public(), "missing_cookies": missing_session_cookies(acc.cookies)}
@@ -109,9 +119,9 @@ async def create_account(body: AccountCreate, svc: Services = Depends(get_servic
 
 @router.post("/accounts/import")
 async def import_accounts(body: AccountsImportRequest,
-                          svc: Services = Depends(get_services)) -> dict:
+                          svc: Annotated[Services, Depends(get_services)]) -> dict:
     """Import several accounts in one request; a failing entry does not abort the batch."""
-    results = []
+    results: list[dict[str, Any]] = []
     for i, item in enumerate(body.accounts):
         try:
             acc = _build_account(item)
@@ -126,7 +136,7 @@ async def import_accounts(body: AccountsImportRequest,
 
 @router.patch("/accounts/{account_id}")
 async def update_account(account_id: str, body: AccountUpdate,
-                         svc: Services = Depends(get_services)) -> dict:
+                         svc: Annotated[Services, Depends(get_services)]) -> dict:
     acc = _get(svc, account_id)
     if body.label is not None:
         acc.label = body.label
@@ -144,14 +154,14 @@ async def update_account(account_id: str, body: AccountUpdate,
 
 
 @router.delete("/accounts/{account_id}")
-async def delete_account(account_id: str, svc: Services = Depends(get_services)) -> dict:
+async def delete_account(account_id: str, svc: Annotated[Services, Depends(get_services)]) -> dict:
     if not await svc.pool.remove(account_id):
         raise NotFound(f"account '{account_id}' not found")
     return {"deleted": account_id}
 
 
 @router.post("/accounts/{account_id}/reset")
-async def reset_account(account_id: str, svc: Services = Depends(get_services)) -> dict:
+async def reset_account(account_id: str, svc: Annotated[Services, Depends(get_services)]) -> dict:
     acc = _get(svc, account_id)
     acc.status, acc.cooldown_until, acc.last_error = AccountStatus.ACTIVE, 0.0, None
     acc.meta.pop("kind_blocked_until", None)  # e.g. video after an unconfirmed VM wake
@@ -161,14 +171,15 @@ async def reset_account(account_id: str, svc: Services = Depends(get_services)) 
 
 
 @router.post("/accounts/{account_id}/renew")
-async def renew(account_id: str, svc: Services = Depends(get_services)) -> dict:
+async def renew(account_id: str, svc: Annotated[Services, Depends(get_services)]) -> dict:
     _get(svc, account_id)
     return await renew_account(svc.pool, svc.driver, account_id)
 
 
 @router.get("/accounts/{account_id}/quota")
-async def account_quota(account_id: str, refresh: bool = False,
-                        svc: Services = Depends(get_services)) -> dict:
+async def account_quota(account_id: str,
+                        svc: Annotated[Services, Depends(get_services)],
+                        refresh: bool = False) -> dict:
     """Ask the active driver for the account's quota snapshot and persist it in ``meta``.
 
     The browser driver caches each account's snapshot for 30 minutes
@@ -205,12 +216,13 @@ async def extension_zip() -> Response:
 
 
 @router.get("/tasks")
-async def list_tasks(limit: int = 100, svc: Services = Depends(get_services)) -> dict:
+async def list_tasks(svc: Annotated[Services, Depends(get_services)],
+                     limit: int = 100) -> dict:
     return {"data": [t.model_dump(mode="json") for t in svc.tasks.list(limit)]}
 
 
 @router.post("/tasks/{task_id}/cancel")
-async def cancel_task(task_id: str, svc: Services = Depends(get_services)) -> dict:
+async def cancel_task(task_id: str, svc: Annotated[Services, Depends(get_services)]) -> dict:
     return {"cancelled": await svc.tasks.cancel(task_id)}
 
 
@@ -234,7 +246,7 @@ def _usage(row: dict | None) -> dict:
 
 
 @router.get("/keys")
-async def list_keys(svc: Services = Depends(get_services)) -> dict:
+async def list_keys(svc: Annotated[Services, Depends(get_services)]) -> dict:
     """Stored keys plus the built-in identities, each with request counts from the log."""
     usage = {r["key_id"]: r for r in (await svc.requests.key_usage())["data"]}
     return {
@@ -244,20 +256,20 @@ async def list_keys(svc: Services = Depends(get_services)) -> dict:
 
 
 @router.get("/keys/usage")
-async def key_usage(svc: Services = Depends(get_services)) -> dict:
+async def key_usage(svc: Annotated[Services, Depends(get_services)]) -> dict:
     """Raw per-``key_id`` counts, including deleted keys still present in the log."""
     return await svc.requests.key_usage()
 
 
 @router.post("/keys")
-async def create_key(body: KeyCreate, svc: Services = Depends(get_services)) -> dict:
+async def create_key(body: KeyCreate, svc: Annotated[Services, Depends(get_services)]) -> dict:
     key, plaintext = await svc.keys.create(body.name.strip(), body.note)
     # The only time the plaintext key is ever returned.
     return {"key": key.public(), "api_key": plaintext}
 
 
 @router.patch("/keys/{key_id}")
-async def update_key(key_id: str, body: KeyUpdate, svc: Services = Depends(get_services)) -> dict:
+async def update_key(key_id: str, body: KeyUpdate, svc: Annotated[Services, Depends(get_services)]) -> dict:
     key = _get_key(svc, key_id)
     if body.name is not None:
         key.name = body.name.strip()
@@ -270,7 +282,7 @@ async def update_key(key_id: str, body: KeyUpdate, svc: Services = Depends(get_s
 
 
 @router.delete("/keys/{key_id}")
-async def delete_key(key_id: str, svc: Services = Depends(get_services)) -> dict:
+async def delete_key(key_id: str, svc: Annotated[Services, Depends(get_services)]) -> dict:
     if not await svc.keys.remove(key_id):
         raise NotFound(f"key '{key_id}' not found")
     return {"deleted": key_id}
@@ -279,6 +291,7 @@ async def delete_key(key_id: str, svc: Services = Depends(get_services)) -> dict
 # ---- request log ----
 @router.get("/requests")
 async def list_requests(
+    svc: Annotated[Services, Depends(get_services)],
     key_id: str | None = None,
     account_id: str | None = None,
     status: Literal["2xx", "3xx", "4xx", "5xx", "failed"] | None = None,
@@ -287,7 +300,6 @@ async def list_requests(
     hide_polls: bool = False,
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
-    svc: Services = Depends(get_services),
 ) -> dict:
     return await svc.requests.query(key_id=key_id, account_id=account_id, status=status,
                                     path=path, since=since, hide_polls=hide_polls,
@@ -295,6 +307,6 @@ async def list_requests(
 
 
 @router.get("/stats")
-async def stats(window: Literal["1h", "24h", "7d"] = "24h",
-                svc: Services = Depends(get_services)) -> dict:
+async def stats(svc: Annotated[Services, Depends(get_services)],
+                window: Literal["1h", "24h", "7d"] = "24h") -> dict:
     return {"now": time.time(), **await svc.requests.stats(window)}

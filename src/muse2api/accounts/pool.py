@@ -212,6 +212,29 @@ class AccountPool:
         return any(a.id not in excluded and a.enabled and a.status != AccountStatus.INVALID
                    for a in self._accounts.values())
 
+    def _reserve(self, free: list[Account], hint: str | None) -> Account:
+        acc = self.strategy.choose(free, hint)
+        self._inflight[acc.id] += 1
+        acc.last_used_at = time.time()
+        return acc
+
+    def _fail_fast(self, deadline: float, busy: bool, back_at: float | None) -> None:
+        remaining = deadline - time.monotonic()
+        back_in = None if back_at is None else back_at - time.time()
+        if not busy and back_in is None:
+            raise NoAccountAvailable("no usable account in pool")
+        if remaining <= 0 or (back_in is not None and not busy and back_in > remaining):
+            # Nothing frees up before the deadline; say why instead of waiting in vain.
+            reason = "busy" if busy else "cooling down"
+            raise NoAccountAvailable(f"all accounts are {reason}, try again later")
+
+    def _next_wait(self, deadline: float, back_at: float | None) -> float:
+        remaining = deadline - time.monotonic()
+        back_in = None if back_at is None else back_at - time.time()
+        if back_in is None:
+            return remaining
+        return min(remaining, max(back_in, 0.05))
+
     async def acquire(
         self, *, exclude: Iterable[str] = (), hint: str | None = None, kind: str | None = None
     ) -> Account:
@@ -221,20 +244,10 @@ class AccountPool:
             while True:
                 free, busy, back_at = self._candidates(exclude, kind)
                 if free:
-                    acc = self.strategy.choose(free, hint)
-                    self._inflight[acc.id] += 1
-                    acc.last_used_at = time.time()
-                    return acc
-                remaining = deadline - time.monotonic()
-                back_in = None if back_at is None else back_at - time.time()
-                if not busy and back_in is None:
-                    raise NoAccountAvailable("no usable account in pool")
-                if remaining <= 0 or (not busy and back_in > remaining):
-                    # Nothing frees up before the deadline; say why instead of waiting in vain.
-                    reason = "busy" if busy else "cooling down"
-                    raise NoAccountAvailable(f"all accounts are {reason}, try again later")
+                    return self._reserve(free, hint)
+                self._fail_fast(deadline, busy, back_at)
                 # Wake on release, or when the soonest cooldown ends (nothing notifies that).
-                wait = remaining if back_in is None else min(remaining, max(back_in, 0.05))
+                wait = self._next_wait(deadline, back_at)
                 try:
                     await asyncio.wait_for(self._cond.wait(), timeout=wait)
                 except asyncio.TimeoutError:
@@ -271,7 +284,7 @@ class AccountPool:
             acc.status = AccountStatus.COOLING
             acc.cooldown_until = time.time() + self.cooldown
 
-    @asynccontextmanager
+    @asynccontextmanager  # pyrefly: ignore[deprecated]
     async def lease(
         self, *, exclude: Iterable[str] = (), hint: str | None = None, kind: str | None = None
     ) -> AsyncIterator[Lease]:

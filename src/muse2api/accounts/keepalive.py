@@ -53,5 +53,5 @@ async def keepalive_loop(pool: AccountPool, driver: MuseDriver, interval: float)
             try:
                 result = await renew_account(pool, driver, acc.id)
                 log.info("keepalive %s -> %s", acc.id, result.get("ok"))
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("keepalive failed for %s", acc.id)

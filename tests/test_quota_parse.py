@@ -118,7 +118,7 @@ class FakePage:
 
     async def send(self, method, params=None, **_):
         self.sent.append((method, params or {}))
-        if method == "Input.dispatchKeyEvent" and params.get("key") == "Escape" and self.closes:
+        if method == "Input.dispatchKeyEvent" and params.get("key") == "Escape" and self.closes:  # type: ignore[attr-defined]
             self.open = False
         return {}
 
@@ -135,14 +135,14 @@ ACC = Account(id="q0", cookies={"hatch_sess": "x"})
 
 @pytest.fixture
 def driver(tmp_path, monkeypatch) -> BrowserDriver:
-    drv = BrowserDriver(Settings(_env_file=None, data_dir=tmp_path, account_max_concurrency=2))
+    drv = BrowserDriver(Settings(_env_file=None, data_dir=tmp_path, account_max_concurrency=2))  # type: ignore[call-arg]
     ids = itertools.count()
-    drv.pages = []
+    drv.pages = []  # type: ignore[attr-defined]
 
     async def fake_open(account: Account) -> _Tab:
         page = FakePage()
-        drv.pages.append(page)
-        return _Tab(account.id, "ctx", f"t{next(ids)}", page)
+        drv.pages.append(page)  # type: ignore[attr-defined]
+        return _Tab(account.id, "ctx", f"t{next(ids)}", page)  # type: ignore[arg-type]
 
     monkeypatch.setattr(drv, "_open_tab", fake_open)
     monkeypatch.setattr(BrowserDriver, "_QUOTA_CLICK_TIMEOUT", 0.05)

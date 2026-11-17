@@ -89,12 +89,17 @@ class ChromiumProcess:
 
         log.info("launching Chromium: %s", self.executable)
         self.proc = await asyncio.create_subprocess_exec(
-            *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
         for _ in range(60):
             if url := await self.browser_ws_url():
                 return url
             if self.proc.returncode is not None:
+                _, stderr = await self.proc.communicate()
+                log.error("Chromium exited prematurely with code %s: %s", self.proc.returncode, stderr.decode(errors="replace"))
                 break
             await asyncio.sleep(0.5)
         raise RuntimeError("Chromium did not expose a DevTools endpoint")

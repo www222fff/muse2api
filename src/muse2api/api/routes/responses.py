@@ -17,7 +17,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
@@ -60,31 +60,33 @@ _TOOL_ITEMS = {"function_call", "function_call_output", "reasoning", "computer_c
                "file_search_call", "web_search_call"}
 
 
+def _input_item_to_message(item) -> dict:
+    """Convert one Responses ``input`` list item to a chat-style message."""
+    if not isinstance(item, dict):
+        raise InvalidRequest("input items must be objects")
+    itype = item.get("type")
+    if itype in _TOOL_ITEMS:
+        raise InvalidRequest(
+            f"input item type '{itype}' is not supported: "
+            "muse.ai has no function calling")
+    if "role" in item or itype in ("message", None):
+        return {"role": item.get("role", "user"),
+                "content": item.get("content")}
+    raise InvalidRequest(f"unsupported input item type '{itype}'")
+
+
 def _to_messages(body: ResponseRequest) -> list[dict]:
     """Convert Responses ``input`` / ``instructions`` to chat-style messages."""
     messages: list[dict] = []
     if body.instructions:
         messages.append({"role": "system", "content": body.instructions})
     inp = body.input
-    if inp is None or (isinstance(inp, str) and not inp.strip()):
-        pass
-    elif isinstance(inp, str):
-        messages.append({"role": "user", "content": inp})
+    if isinstance(inp, str):
+        if inp.strip():
+            messages.append({"role": "user", "content": inp})
     elif isinstance(inp, list):
-        for item in inp:
-            if not isinstance(item, dict):
-                raise InvalidRequest("input items must be objects")
-            itype = item.get("type")
-            if itype in _TOOL_ITEMS:
-                raise InvalidRequest(
-                    f"input item type '{itype}' is not supported: "
-                    "muse.ai has no function calling")
-            if "role" in item or itype in ("message", None):
-                messages.append({"role": item.get("role", "user"),
-                                 "content": item.get("content")})
-            else:
-                raise InvalidRequest(f"unsupported input item type '{itype}'")
-    else:
+        messages.extend(_input_item_to_message(item) for item in inp)
+    elif inp is not None:
         raise InvalidRequest("input must be a string or a list of items")
     return messages
 
@@ -110,9 +112,33 @@ def _response_object(resp_id: str, msg_id: str, created: int, model: str, text: 
             "tool_choice": "auto", "tools": []}
 
 
+async def _collect_first(stream, svc):
+    """Pre-fetch the first delta; emit SSE heartbeats while waiting (C4)."""
+    interval = float(svc.settings.stream_heartbeat_interval)
+    if interval <= 0:
+        try:
+            return await anext(stream), []
+        except StopAsyncIteration:
+            return "", []
+    pending = asyncio.ensure_future(anext(stream))
+    heartbeats: list[bytes] = []
+    try:
+        while True:
+            done, _ = await asyncio.wait({pending}, timeout=interval)
+            if done:
+                try:
+                    return pending.result(), heartbeats
+                except StopAsyncIteration:
+                    return "", heartbeats
+            heartbeats.append(b": keepalive\n\n")
+    finally:
+        if not pending.done():
+            pending.cancel()
+
+
 @router.post("/v1/responses")
 async def create_response(body: ResponseRequest, request: Request,
-                          svc: Services = Depends(get_services)):
+                          svc: Annotated[Services, Depends(get_services)]):
     request.state.model = body.model  # logged even if it does not resolve
     spec = resolve_model(body.model, "chat")
     request.state.model = body.model or spec.id
@@ -149,25 +175,10 @@ async def create_response(body: ResponseRequest, request: Request,
         # 200 (headers) has already been committed to the client.
         seq = 0
         try:
-            if first is None and svc.settings.stream_heartbeat_interval > 0:
-                # Same C4 pattern as chat completions: send SSE comment
-                # heartbeats while the gateway waits for the first token.
-                pending = asyncio.ensure_future(anext(stream))
-                try:
-                    while True:
-                        done, _ = await asyncio.wait(
-                            {pending},
-                            timeout=svc.settings.stream_heartbeat_interval)
-                        if done:
-                            try:
-                                first = pending.result()
-                            except StopAsyncIteration:
-                                first = ""
-                            break
-                        yield b": keepalive\n\n"
-                finally:
-                    if not pending.done():
-                        pending.cancel()
+            if first is None:
+                first, heartbeats = await _collect_first(stream, svc)
+                for beat in heartbeats:
+                    yield beat
             yield _sse({"type": "response.created", "sequence_number": seq,
                         "response": _response_object(resp_id, msg_id, created, model_name,
                                                      "", flat.text, status="in_progress")})
@@ -209,12 +220,12 @@ async def create_response(body: ResponseRequest, request: Request,
                                                      produced, flat.text)})
         except Muse2APIError as exc:
             yield _sse(exc.to_body())
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("responses stream crashed")
             yield _sse({"error": {"message": "internal error", "type": "server_error"}})
         finally:
             cancel.set()
-            await stream.aclose()
+            await stream.aclose()  # type: ignore[attr-defined]  # upstream stream is an async generator
 
     # With stream_heartbeat_interval set (C4), the 200 goes out immediately;
     # upstream errors then surface as SSE error events instead of HTTP codes.

@@ -12,6 +12,7 @@ import os
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 import httpx
 
@@ -63,7 +64,7 @@ def _merge_cookies(resp: httpx.Response, jar: dict[str, str], expires: dict[str,
         if c.value:
             jar[c.name] = c.value
         if c.expires:
-            expires[c.name] = int(c.expires)
+            expires[c.name] = c.expires
 
 
 def _json_body(resp: httpx.Response) -> dict:
@@ -114,9 +115,11 @@ async def renew_session(
         _merge_cookies(resp, jar, expires)
         body = _json_body(resp)
         # Persisted with the account, so keep only short strings.
-        meta = {key: (str(body[src])[:128] if body.get(src) is not None else None)
-                for key, src in (("session_status", "status"), ("vm_id", "vm_id"),
-                                 ("vm_state", "vm_state"))}
+        meta: dict[str, Any] = {
+            key: (str(body[src])[:128] if body.get(src) is not None else None)
+            for key, src in (("session_status", "status"), ("vm_id", "vm_id"),
+                             ("vm_state", "vm_state"))
+        }
 
         if wake_vm and meta["vm_id"] and meta["vm_state"] != "DISABLED":
             try:

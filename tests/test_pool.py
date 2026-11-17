@@ -49,7 +49,7 @@ async def test_auth_error_invalidates(tmp_path):
     with pytest.raises(UpstreamAuthError):
         async with pool.lease():
             raise UpstreamAuthError("bad cookie")
-    assert pool.get("a0").status == AccountStatus.INVALID
+    assert pool.get("a0").status == AccountStatus.INVALID  # type: ignore[attr-defined]
     with pytest.raises(NoAccountAvailable):
         await pool.acquire()
 
@@ -80,8 +80,8 @@ async def test_gateway_fails_over(tmp_path):
     gw = Gateway(pool, _FlakyDriver({"a0"}), max_failover=2)
     text = "".join([d async for d in gw.chat_stream(ChatRequest(prompt="hi", model="m"))])
     assert "hi" in text
-    assert pool.get("a0").status == AccountStatus.COOLING
-    assert pool.get("a1").success_count == 1
+    assert pool.get("a0").status == AccountStatus.COOLING  # type: ignore[attr-defined]
+    assert pool.get("a1").success_count == 1  # type: ignore[attr-defined]
 
 
 async def test_single_account_failure_keeps_original_error(tmp_path):
@@ -91,13 +91,13 @@ async def test_single_account_failure_keeps_original_error(tmp_path):
     # No other account: no pointless retry that would hide "boom" behind NoAccountAvailable.
     with pytest.raises(UpstreamError, match="boom"):
         _ = [d async for d in gw.chat_stream(ChatRequest(prompt="hi", model="m"))]
-    assert pool.get("a0").fail_count == 1
+    assert pool.get("a0").fail_count == 1  # type: ignore[attr-defined]
 
 
 async def test_acquire_waits_for_cooldown_to_end(tmp_path):
     pool = await _pool(tmp_path, n=1)
     acc = pool.get("a0")
-    acc.status, acc.cooldown_until = AccountStatus.COOLING, time.time() + 0.1
+    acc.status, acc.cooldown_until = AccountStatus.COOLING, time.time() + 0.1  # type: ignore[attr-defined]
     got = await pool.acquire()  # acquire_timeout is 0.2s, cooldown ends after 0.1s
     assert got.id == "a0"
 
@@ -105,7 +105,7 @@ async def test_acquire_waits_for_cooldown_to_end(tmp_path):
 async def test_acquire_fails_fast_when_cooldown_outlasts_timeout(tmp_path):
     pool = await _pool(tmp_path, n=1)
     acc = pool.get("a0")
-    acc.status, acc.cooldown_until = AccountStatus.COOLING, time.time() + 60
+    acc.status, acc.cooldown_until = AccountStatus.COOLING, time.time() + 60  # type: ignore[attr-defined]
     started = time.monotonic()
     with pytest.raises(NoAccountAvailable, match="cooling"):
         await pool.acquire()
@@ -120,7 +120,7 @@ async def test_timeout_does_not_cool_the_account(tmp_path):
         async with pool.lease():
             raise UpstreamTimeout("video generation timed out")
     acc = pool.get("a0")
-    assert acc.status == AccountStatus.ACTIVE and acc.fail_count == 1
+    assert acc.status == AccountStatus.ACTIVE and acc.fail_count == 1  # type: ignore[attr-defined]
     assert (await pool.acquire()).id == "a0"
 
 
@@ -129,4 +129,4 @@ async def test_other_upstream_errors_still_cool_down(tmp_path):
     with pytest.raises(UpstreamError):
         async with pool.lease():
             raise UpstreamError("browser error")
-    assert pool.get("a0").status == AccountStatus.COOLING
+    assert pool.get("a0").status == AccountStatus.COOLING  # type: ignore[attr-defined]

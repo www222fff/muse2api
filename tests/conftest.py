@@ -14,7 +14,7 @@ ADMIN_KEY = "admin-key"
 @pytest.fixture
 def settings(tmp_path) -> Settings:
     return Settings(
-        _env_file=None,
+        _env_file=None,  # type: ignore[call-arg]
         data_dir=tmp_path / "data",
         api_key=API_KEY,
         admin_key=ADMIN_KEY,

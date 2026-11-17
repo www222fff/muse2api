@@ -113,7 +113,7 @@ class RequestLog:
     async def open(self) -> None:
         try:
             await asyncio.to_thread(self._call, lambda db: None)
-        except Exception:  # noqa: BLE001
+        except Exception:
             # Not fatal: the connection is retried on the next write.
             log.exception("failed to open request log %s", self.path)
 
@@ -142,7 +142,7 @@ class RequestLog:
 
         try:
             await asyncio.to_thread(self._call, run)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("failed to write request log row")
 
     async def finish_task(self, task_id: str, status: str, finished_at: float,
@@ -160,7 +160,7 @@ class RequestLog:
 
         try:
             await asyncio.to_thread(self._call, run)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("failed to record outcome of task %s", task_id)
 
     async def backfill_tasks(self, tasks: list[Any]) -> None:
@@ -172,7 +172,7 @@ class RequestLog:
         sql = _FINISH_SQL + " AND task_status IS NULL"
         try:
             await asyncio.to_thread(self._call, lambda db: db.executemany(sql, rows))
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("failed to backfill task outcomes")
 
     async def prune(self, retention_days: float) -> int:
@@ -180,7 +180,7 @@ class RequestLog:
         try:
             cur = await asyncio.to_thread(
                 self._call, lambda db: db.execute("DELETE FROM requests WHERE ts < ?", (cutoff,)))
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("failed to prune request log")
             return 0
         if cur.rowcount:
