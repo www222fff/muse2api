@@ -58,8 +58,17 @@ def _get_file_index(base: Path) -> dict[str, Path]:
 
     idx: dict[str, Path] = {}
     skipped = {
-        ".git", ".venv", "venv", "__pycache__", "node_modules",
-        "graphify-out", "packaging", "starters", "scratch", "data", "logs"
+        ".git",
+        ".venv",
+        "venv",
+        "__pycache__",
+        "node_modules",
+        "graphify-out",
+        "packaging",
+        "starters",
+        "scratch",
+        "data",
+        "logs",
     }
     for root, dirs, files in os.walk(base):
         dirs[:] = [d for d in dirs if d not in skipped and not d.startswith(".")]
@@ -128,9 +137,16 @@ def _has_gap_triggers(text: str) -> bool:
 def _get_gap_sisters() -> tuple[str, ...]:
     """Get the list of sister module names for gap strategies."""
     return (
-        "config.py", "gap_quality_filters.py", "models.py", "__init__.py",
-        "aging_detector.py", "aging_execution.py", "aging_runner.py",
-        "dynamic_ledger.py", "runner.py", "gap_entry_confirmation.py",
+        "config.py",
+        "gap_quality_filters.py",
+        "models.py",
+        "__init__.py",
+        "aging_detector.py",
+        "aging_execution.py",
+        "aging_runner.py",
+        "dynamic_ledger.py",
+        "runner.py",
+        "gap_entry_confirmation.py",
     )
 
 
@@ -154,9 +170,20 @@ def _has_sweep_triggers(text: str) -> bool:
     """Check if text mentions liquidity sweep or related strategies."""
     t_lower = text.lower()
     sweep_triggers = (
-        "liquidity_sweep", "sw_sl", "sweep", "eqh_eql", "pdh_pdl",
-        "naturalgas", "crudeoil", "silverm", "ultra_accuracy_95", "re-entry",
-        "sl floor", "sl_hit", "sl hit", "reclaim",
+        "liquidity_sweep",
+        "sw_sl",
+        "sweep",
+        "eqh_eql",
+        "pdh_pdl",
+        "naturalgas",
+        "crudeoil",
+        "silverm",
+        "ultra_accuracy_95",
+        "re-entry",
+        "sl floor",
+        "sl_hit",
+        "sl hit",
+        "reclaim",
     )
     return any(k in t_lower for k in sweep_triggers)
 
@@ -164,8 +191,13 @@ def _has_sweep_triggers(text: str) -> bool:
 def _get_sweep_core() -> tuple[str, ...]:
     """Get the core sweep module names."""
     return (
-        "option_sweep_detector.py", "option_sweep_scanner.py", "config.py",
-        "commodity_params.py", "runner.py", "_runner_dispatch_impl.py", "models.py",
+        "option_sweep_detector.py",
+        "option_sweep_scanner.py",
+        "config.py",
+        "commodity_params.py",
+        "runner.py",
+        "_runner_dispatch_impl.py",
+        "models.py",
     )
 
 
@@ -183,33 +215,46 @@ def _attach_sweep_modules(text: str, base: Path, found: list[Path]) -> None:
                 found.append(s_path)
 
 
+def _add_dirty_file(line: str, base: Path, found: list[Path]) -> bool:
+    """Append one porcelain status line's file when it is a tracked code file."""
+    if len(line) < 4:
+        return False
+    rel_f = line[3:].strip()
+    if not rel_f.endswith((".py", ".toml")):
+        return False
+    f_path = base / rel_f
+    if f_path.is_file() and f_path not in found:
+        found.append(f_path)
+        return True
+    return False
+
+
 def _attach_dirty_files(text: str, base: Path, found: list[Path], max_count: int = 3) -> None:
     """Attach recently modified git files only when explicitly discussing patches or reviews."""
     t_lower = text.lower()
     patch_triggers = (
-        "patch", "uncommitted", "dirty", "git diff", "git status",
-        "review my changes", "review diff", "review modified",
+        "patch",
+        "uncommitted",
+        "dirty",
+        "git diff",
+        "git status",
+        "review my changes",
+        "review diff",
+        "review modified",
     )
     if not any(k in t_lower for k in patch_triggers):
         return
     try:
         res = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=base, capture_output=True, text=True, timeout=2.0
+            ["git", "status", "--porcelain"], cwd=base, capture_output=True, text=True, timeout=2.0
         )
         if res.returncode == 0:
             count = 0
             for line in res.stdout.splitlines():
-                if len(line) < 4:
-                    continue
-                rel_f = line[3:].strip()
-                if rel_f.endswith((".py", ".toml")):
-                    f_path = base / rel_f
-                    if f_path.is_file() and f_path not in found:
-                        found.append(f_path)
-                        count += 1
-                        if count >= max_count:
-                            break
+                if _add_dirty_file(line, base, found):
+                    count += 1
+                    if count >= max_count:
+                        break
     except Exception:
         pass
 
@@ -225,23 +270,30 @@ def get_git_context(base: Path, text: str) -> str:
     """Retrieve git context (log, diff, status) if git commands or history are mentioned."""
     t_lower = text.lower()
     git_triggers = (
-        "commit", "commits", "git log", "git history", "git diff",
-        "last 5 commits", "last five commits", "recent commits"
+        "commit",
+        "commits",
+        "git log",
+        "git history",
+        "git diff",
+        "last 5 commits",
+        "last five commits",
+        "recent commits",
     )
     if not any(k in t_lower for k in git_triggers):
         return ""
     try:
         status_res = subprocess.run(
-            ["git", "status", "--short"],
-            cwd=base, capture_output=True, text=True, timeout=3.0
+            ["git", "status", "--short"], cwd=base, capture_output=True, text=True, timeout=3.0
         )
         log_res = subprocess.run(
             ["git", "log", "-5", "--stat", "--pretty=format:Commit: %h | Date: %ad | Subject: %s"],
-            cwd=base, capture_output=True, text=True, timeout=5.0
+            cwd=base,
+            capture_output=True,
+            text=True,
+            timeout=5.0,
         )
         recent_diff = subprocess.run(
-            ["git", "show", "--stat", "HEAD"],
-            cwd=base, capture_output=True, text=True, timeout=5.0
+            ["git", "show", "--stat", "HEAD"], cwd=base, capture_output=True, text=True, timeout=5.0
         )
         return (
             f"\n[Local Git Context — 5 Most Recent Commits and Diff Stat]\n"
@@ -260,7 +312,7 @@ def find_local_paths(
     max_files: int = 5,
     **kwargs,
 ) -> list[Path]:
-    """Extract existing paths mentioned in the active user prompt (capped to prevent token bloat)."""
+    """Extract file paths mentioned in the active user prompt (token-capped)."""
     base = base_dir or get_default_workspace()
     found: list[Path] = [base]
 
@@ -289,8 +341,9 @@ def _collect_code_files(p: Path, limit: int = 50) -> list[str]:
     return sorted(files)
 
 
-def _collect_from_dir(files: list[str], fnames: list[str], rel_root: Path,
-                      allowed_exts: tuple[str, ...], limit: int) -> None:
+def _collect_from_dir(
+    files: list[str], fnames: list[str], rel_root: Path, allowed_exts: tuple[str, ...], limit: int
+) -> None:
     """Collect code files from a single walked directory into ``files`` (capped)."""
     for f in fnames:
         if _is_code_file(f, allowed_exts):
@@ -360,12 +413,16 @@ def build_context_for_paths(
         "   Or use: `### File: path/to/file.py` immediately followed by the code block.",
         "2. The bridge automatically writes your code directly to disk upon completion.",
         "   The user will immediately see the changes in their Git Source Control / Changes tab.",
-        "3. NEVER say 'I cannot write directly to your Mac' or tell the user to manually run '/save'.",
-        "   Confirm that the file has been edited on disk for the user to review in Source Control.",
+        "3. NEVER say 'I cannot write directly to your Mac' or tell the "
+        "user to manually run '/save'.",
+        "   Confirm that the file has been edited on disk for the user to "
+        "review in Source Control.",
         "4. CRITICAL REPOSITORY CODING RULES:",
-        "   - STRICTLY PROHIBITED: `from __future__ import annotations` (deprecated in Python 3.14+).",
+        "   - STRICTLY PROHIBITED: `from __future__ import annotations` "
+        "(deprecated in Python 3.14+).",
         "   - Hard cap: <= 250 lines per .py file.",
-        "   - Zero floating-point equality (== or != against floats). Use thresholds or math.isclose.",
+        "   - Zero floating-point equality (== or != against floats). "
+        "Use thresholds or math.isclose.",
         "   - Flake8 compliance: max line length 100 characters.",
     ]
     if prompt:
@@ -385,8 +442,9 @@ def build_context_for_paths(
     return "\n".join(blocks)
 
 
-def _append_path_context(p: Path, base: Path, blocks: list[str],
-                         seen_files: set[Path], max_chars: int) -> None:
+def _append_path_context(
+    p: Path, base: Path, blocks: list[str], seen_files: set[Path], max_chars: int
+) -> None:
     """Append the formatted block for one path (directory or file)."""
     if p.is_dir():
         files = _collect_code_files(p)
@@ -398,8 +456,11 @@ def _append_path_context(p: Path, base: Path, blocks: list[str],
 
 def _append_small_file(f_p: Path, blocks: list[str], seen_files: set[Path]) -> None:
     """Attach a small code file to the context (12k char cap)."""
-    if (f_p.is_file() and f_p.suffix in (".py", ".json", ".toml", ".yaml", ".md")
-            and f_p not in seen_files):
+    if (
+        f_p.is_file()
+        and f_p.suffix in (".py", ".json", ".toml", ".yaml", ".md")
+        and f_p not in seen_files
+    ):
         seen_files.add(f_p)
         _format_file_block(f_p, 12000, blocks)
 
@@ -408,6 +469,70 @@ def extract_code_block(text: str) -> str | None:
     """Extract code from python markdown block in text."""
     m = re.search(r"```(?:python|py)?[^\n]*\n(.*?)```", text, re.DOTALL)
     return m.group(1).strip() if m else None
+
+
+# Edit-extraction patterns (kept at module scope for testability).
+_RE_EDIT_BLOCK = re.compile(
+    r"```(?:python|py)?[:\s]+([a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9_]+)[^\n]*\n(.*?)```",
+    re.DOTALL,
+)
+_RE_EDIT_FILE = re.compile(
+    r"(?:###?\s*File:\s*|File:\s*|\*\*File\*\*:\s*)(`?[a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9_]+`?)"
+    r"[^\n]*\n+```(?:[a-zA-Z0-9_\-]+)?\n(.*?)```",
+    re.DOTALL,
+)
+_RE_EDIT_SAVE = re.compile(r"(?:Save with:\s*)?/save\s+(`?[a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9_]+`?)")
+_RE_EDIT_PATH = re.compile(r"([a-zA-Z0-9_\-./\\]+\.(?:py|json|toml|yaml|md))")
+_EDIT_INTENT_KEYWORDS = (
+    "fix",
+    "edit",
+    "save",
+    "update",
+    "patch",
+    "refactor",
+    "rewrite",
+    "correct",
+    "replace",
+    "add",
+    "implement",
+    "todo",
+)
+
+
+def _collect_simple_matches(
+    regex, reply: str, seen_targets: set[str], *, strip_ticks: bool = False
+) -> list[tuple[str, str]]:
+    """Collect non-duplicate (target, code) matches from a regex over reply."""
+    out: list[tuple[str, str]] = []
+    for m in regex.finditer(reply):
+        tgt = m.group(1).strip()
+        if strip_ticks:
+            tgt = tgt.strip("`*")
+        code = m.group(2).strip()
+        if tgt and code and tgt not in seen_targets:
+            seen_targets.add(tgt)
+            out.append((tgt, code))
+    return out
+
+
+def _resolve_fallback_target(prompt: str, reply: str, paths: list[Path] | None) -> str | None:
+    """Resolve the single target file for the fallback extraction pattern."""
+    py_matches = _RE_EDIT_PATH.findall(f"{prompt} {reply}")
+    valid_py = [
+        f for f in py_matches if not f.startswith("python") and ("/" in f or f.endswith(".py"))
+    ]
+    if valid_py:
+        return valid_py[0]
+    if paths:
+        file_paths = [p for p in paths if p.is_file()]
+        if len(file_paths) == 1:
+            return str(file_paths[0])
+    return None
+
+
+def _has_edit_intent(prompt: str) -> bool:
+    lowered = prompt.lower()
+    return any(word in lowered for word in _EDIT_INTENT_KEYWORDS)
 
 
 def extract_file_edits(
@@ -420,33 +545,13 @@ def extract_file_edits(
     seen_targets: set[str] = set()
 
     # Pattern 1: ```python:path/to/file.ext or ```python path/to/file.ext
-    p1 = re.compile(
-        r"```(?:python|py)?[:\s]+([a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9_]+)[^\n]*\n(.*?)```",
-        re.DOTALL,
-    )
-    for m in p1.finditer(reply):
-        tgt = m.group(1).strip()
-        code = m.group(2).strip()
-        if tgt and code and tgt not in seen_targets:
-            seen_targets.add(tgt)
-            edits.append((tgt, code))
+    edits += _collect_simple_matches(_RE_EDIT_BLOCK, reply, seen_targets)
 
     # Pattern 2: ### File: path/to/file.ext or File: path/to/file.ext before code block
-    p2 = re.compile(
-        r"(?:###?\s*File:\s*|File:\s*|\*\*File\*\*:\s*)(`?[a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9_]+`?)"
-        r"[^\n]*\n+```(?:[a-zA-Z0-9_\-]+)?\n(.*?)```",
-        re.DOTALL,
-    )
-    for m in p2.finditer(reply):
-        tgt = m.group(1).strip().strip("`*")
-        code = m.group(2).strip()
-        if tgt and code and tgt not in seen_targets:
-            seen_targets.add(tgt)
-            edits.append((tgt, code))
+    edits += _collect_simple_matches(_RE_EDIT_FILE, reply, seen_targets, strip_ticks=True)
 
     # Pattern 3: Save with: /save path/to/file.ext or /save path/to/file.ext in text
-    p3 = re.compile(r"(?:Save with:\s*)?/save\s+(`?[a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9_]+`?)")
-    save_match = p3.search(reply)
+    save_match = _RE_EDIT_SAVE.search(reply)
     if save_match:
         tgt = save_match.group(1).strip().strip("`*")
         code = extract_code_block(reply)
@@ -458,28 +563,9 @@ def extract_file_edits(
     if not edits:
         code = extract_code_block(reply)
         if code and len(code.splitlines()) >= 2:
-            target_file: str | None = None
-            py_matches = re.findall(
-                r"([a-zA-Z0-9_\-./\\]+\.(?:py|json|toml|yaml|md))",
-                f"{prompt} {reply}",
-            )
-            valid_py = [
-                f for f in py_matches
-                if not f.startswith("python") and ("/" in f or f.endswith(".py"))
-            ]
-            if valid_py:
-                target_file = valid_py[0]
-            elif paths:
-                file_paths = [p for p in paths if p.is_file()]
-                if len(file_paths) == 1:
-                    target_file = str(file_paths[0])
-            if target_file and target_file not in seen_targets:
-                intent_keywords = (
-                    "fix", "edit", "save", "update", "patch", "refactor",
-                    "rewrite", "correct", "replace", "add", "implement", "todo",
-                )
-                if any(w in prompt.lower() for w in intent_keywords):
-                    edits.append((target_file, code))
+            target_file = _resolve_fallback_target(prompt, reply, paths)
+            if target_file and target_file not in seen_targets and _has_edit_intent(prompt):
+                edits.append((target_file, code))
 
     return edits
 
@@ -505,7 +591,9 @@ def save_code_to_file(path_str: str, code: str) -> tuple[bool, str]:
         if p.suffix == ".py":
             res = subprocess.run(
                 ["python", "-m", "py_compile", str(p)],
-                capture_output=True, text=True, check=False,
+                capture_output=True,
+                text=True,
+                check=False,
             )
             if res.returncode != 0:
                 return False, f"Syntax error in {p.name}: {res.stderr}"

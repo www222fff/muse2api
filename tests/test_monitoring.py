@@ -15,25 +15,30 @@ def _requests(client, admin, **params) -> list[dict]:
     return r.json()["data"]
 
 
+def _assert_created_key(plaintext: str, key: dict, stored_text: str) -> None:
+    assert plaintext.startswith("m2a-")
+    assert key["prefix"] == plaintext[:8]
+    assert "hash" not in key
+    assert plaintext not in stored_text
+    assert json.loads(stored_text)[0]["hash"] == hash_key(plaintext)
+
+
+def _assert_listed_key(listed: list[dict]) -> None:
+    assert [k["name"] for k in listed] == ["alice"]
+    assert "hash" not in listed[0]
+    assert listed[0]["last_used_at"] > 0
+
+
 def test_key_lifecycle(client, admin, settings):
     r = client.post("/admin/keys", headers=admin, json={"name": "alice", "note": "laptop"})
     assert r.status_code == 200
     body = r.json()
     plaintext, key = body["api_key"], body["key"]
-    assert plaintext.startswith("m2a-")
-    assert key["prefix"] == plaintext[:8]
-    assert "hash" not in key
-
-    # Only the hash is persisted.
-    stored = settings.keys_file.read_text(encoding="utf-8")
-    assert plaintext not in stored
-    assert json.loads(stored)[0]["hash"] == hash_key(plaintext)
+    _assert_created_key(plaintext, key, settings.keys_file.read_text(encoding="utf-8"))
 
     assert client.get("/v1/models", headers=_bearer(plaintext)).status_code == 200
     listed = client.get("/admin/keys", headers=admin).json()["data"]
-    assert [k["name"] for k in listed] == ["alice"]
-    assert "hash" not in listed[0]
-    assert listed[0]["last_used_at"] > 0
+    _assert_listed_key(listed)
 
     r = client.patch(f"/admin/keys/{key['id']}", headers=admin, json={"revoked": True})
     assert r.json()["key"]["revoked"] is True
@@ -134,6 +139,31 @@ def test_stats_shape(client, auth, admin):
     assert client.get("/admin/stats", headers=admin, params={"window": "2y"}).status_code == 400
 
 
+def _assert_key_usage_summary(body: dict) -> None:
+    by_name = {k["name"]: k for k in body["data"]}
+    assert by_name["alice"]["usage"]["total"] == 3
+    assert by_name["alice"]["usage"]["requests_24h"] == 3
+    assert by_name["alice"]["usage"]["errors_24h"] == 1
+    assert by_name["alice"]["usage"]["last_request_at"] > 0
+    assert by_name["idle"]["usage"] == {"total": 0, "requests_24h": 0, "errors_24h": 0,
+                                        "last_request_at": None}
+
+
+def _assert_builtin_usage(body: dict) -> None:
+    builtin = {b["id"]: b["usage"] for b in body["builtin"]}
+    assert set(builtin) == {"legacy", "admin"}
+    assert builtin["legacy"]["total"] == 1 and builtin["legacy"]["errors_24h"] == 0
+    assert builtin["admin"]["total"] == 0  # /admin/* calls are not logged
+
+
+def _assert_raw_usage_rows(raw: dict, alice_key_id: str) -> None:
+    assert raw["since"] > 0
+    rows = {row["key_id"]: row for row in raw["data"]}
+    assert rows[alice_key_id]["key_name"] == "alice"
+    assert rows[alice_key_id]["total"] == 3
+    assert None not in rows  # unauthenticated requests have no key
+
+
 def test_key_usage(client, auth, admin):
     alice = client.post("/admin/keys", headers=admin, json={"name": "alice"}).json()
     client.post("/admin/keys", headers=admin, json={"name": "idle"})
@@ -148,24 +178,11 @@ def test_key_usage(client, auth, admin):
     r = client.get("/admin/keys", headers=admin)
     assert r.status_code == 200
     body = r.json()
-    by_name = {k["name"]: k for k in body["data"]}
-    assert by_name["alice"]["usage"]["total"] == 3
-    assert by_name["alice"]["usage"]["requests_24h"] == 3
-    assert by_name["alice"]["usage"]["errors_24h"] == 1
-    assert by_name["alice"]["usage"]["last_request_at"] > 0
-    assert by_name["idle"]["usage"] == {"total": 0, "requests_24h": 0, "errors_24h": 0,
-                                        "last_request_at": None}
-    builtin = {b["id"]: b["usage"] for b in body["builtin"]}
-    assert set(builtin) == {"legacy", "admin"}
-    assert builtin["legacy"]["total"] == 1 and builtin["legacy"]["errors_24h"] == 0
-    assert builtin["admin"]["total"] == 0  # /admin/* calls are not logged
+    _assert_key_usage_summary(body)
+    _assert_builtin_usage(body)
 
     raw = client.get("/admin/keys/usage", headers=admin).json()
-    assert raw["since"] > 0
-    rows = {row["key_id"]: row for row in raw["data"]}
-    assert rows[alice["key"]["id"]]["key_name"] == "alice"
-    assert rows[alice["key"]["id"]]["total"] == 3
-    assert None not in rows  # unauthenticated requests have no key
+    _assert_raw_usage_rows(raw, alice["key"]["id"])
     assert client.get("/admin/keys/usage", headers=auth).status_code == 401
 
 

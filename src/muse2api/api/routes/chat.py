@@ -143,7 +143,7 @@ async def chat_completions(body: ChatCompletionRequest, request: Request,
                             "usage": usage})
         except Muse2APIError as exc:
             yield _sse(exc.to_body())
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("stream crashed")
             yield _sse({"error": {"message": "internal error", "type": "server_error"}})
         finally:

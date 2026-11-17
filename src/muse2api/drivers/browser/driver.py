@@ -753,7 +753,7 @@ class BrowserDriver(MuseDriver):
     async def _warm_one(self, account: Account, tab: _Tab) -> bool:
         try:
             await self._warm_up(tab)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._forget(tab)
             if isinstance(exc, CDPError):
                 await self._close_tab(tab)
@@ -1118,7 +1118,7 @@ class BrowserDriver(MuseDriver):
                 await self._escape(tab)
                 if await tab.session.evaluate(dom.QUOTA_DIALOG_TEXT):
                     tab.stale = True
-            except Exception:  # noqa: BLE001
+            except Exception:
                 tab.stale = True
             if tab.stale:
                 log.warning("settings dialog stayed open on a tab of %s; retiring it",

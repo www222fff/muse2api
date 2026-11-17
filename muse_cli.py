@@ -40,6 +40,7 @@ try:
     from rich.markdown import Markdown
     from rich.panel import Panel
     from rich.table import Table
+
     HAVE_RICH = True
     console = Console()
 except ImportError:
@@ -56,6 +57,7 @@ try:
     from prompt_toolkit.formatted_text import ANSI
     from prompt_toolkit.history import FileHistory, InMemoryHistory
     from prompt_toolkit.key_binding import KeyBindings
+
     HAVE_PROMPT_TOOLKIT = True
 except ImportError:
     pass
@@ -117,42 +119,50 @@ def _create_prompt_session() -> Any:
     )
 
 
+def _gateway_reachable(timeout: float = 1.5) -> bool:
+    """Probe the gateway health endpoint (True when HTTP 200)."""
+    try:
+        return httpx.get(f"{GATEWAY_BASE}/healthz", timeout=timeout).status_code == 200
+    except Exception:
+        return False
+
+
+def _emit_status_line(message: str, *, ok: bool | None = None) -> None:
+    """Print a status line via Rich (when available) or plain text."""
+    if HAVE_RICH and console:
+        if ok is True:
+            console.print(f"[bold green]{message}[/bold green]\n")
+        elif ok is False:
+            console.print(f"[bold red]{message}[/bold red]\n")
+        else:
+            console.print(f"[bold yellow]{message}[/bold yellow]")
+    else:
+        print(message)
+
+
 def ensure_gateway() -> bool:
     """Check if gateway is reachable; if not, automatically launch it."""
-    try:
-        r = httpx.get(f"{GATEWAY_BASE}/healthz", timeout=1.5)
-        if r.status_code == 200:
-            return True
-    except Exception:
-        pass
+    if _gateway_reachable():
+        return True
 
     script = Path("/Users/Gaurav_Batra/muse2api/start_gateway.sh")
     if not script.exists():
         script = Path(__file__).resolve().parent / "start_gateway.sh"
-    if script.exists():
-        if HAVE_RICH and console:
-            console.print("\n[bold yellow]↻ Gateway is offline. Auto-starting muse2api gateway on port 18610...[/bold yellow]")
-        else:
-            print("\n↻ Gateway is offline. Auto-starting muse2api gateway on port 18610...")
-        try:
-            subprocess.run([str(script)], check=False, capture_output=True, timeout=10.0)
-            import time
-            for _ in range(16):
-                time.sleep(0.5)
-                try:
-                    if httpx.get(f"{GATEWAY_BASE}/healthz", timeout=1.5).status_code == 200:
-                        if HAVE_RICH and console:
-                            console.print("[bold green]✓ Gateway is online and ready.[/bold green]\n")
-                        else:
-                            print("✓ Gateway is online and ready.\n")
-                        return True
-                except Exception:
-                    pass
-        except Exception as e:
-            if HAVE_RICH and console:
-                console.print(f"[bold red]✗ Failed to start gateway: {e}[/bold red]\n")
-            else:
-                print(f"✗ Failed to start gateway: {e}\n")
+    if not script.exists():
+        return False
+
+    _emit_status_line("\n↻ Gateway is offline. Auto-starting muse2api gateway on port 18610...")
+    try:
+        subprocess.run([str(script)], check=False, capture_output=True, timeout=10.0)
+        import time
+
+        for _ in range(16):
+            time.sleep(0.5)
+            if _gateway_reachable():
+                _emit_status_line("✓ Gateway is online and ready.\n", ok=True)
+                return True
+    except Exception as e:
+        _emit_status_line(f"✗ Failed to start gateway: {e}\n", ok=False)
     return False
 
 
@@ -169,7 +179,7 @@ def web_search(query: str, limit: int = 4) -> str:
             snippets = re.findall(r"class=\x27result-snippet\x27>(.*?)</td>", resp.text, re.DOTALL)
             clean = [re.sub(r"<[^>]+>", "", s).strip() for s in snippets]
             if clean:
-                return "\n".join(f"[Web Result {i+1}]: {s}" for i, s in enumerate(clean[:limit]))
+                return "\n".join(f"[Web Result {i + 1}]: {s}" for i, s in enumerate(clean[:limit]))
     except Exception as e:
         return f"[Web Search Error: {e}]"
     return "[No web search results found]"
@@ -192,6 +202,8 @@ def compact_history(history: list[dict], max_turns: int = 4) -> list[dict]:
         "content": "[Previous Conversation Context Compacted]:\n" + "\n".join(summary_parts),
     }
     return [summary_msg] + recent_turns
+
+
 BASE_URL = os.environ.get("MUSE2API_BASE_URL", "http://127.0.0.1:18610/v1")
 GATEWAY_BASE = BASE_URL.rstrip("/v1").rstrip("/")
 API_KEY = os.environ.get("MUSE2API_API_KEY", "sk-muse2api-local-secret")
@@ -243,11 +255,13 @@ def get_git_info(ws: Path) -> tuple[str, str]:
     try:
         remote = subprocess.run(
             ["git", "remote", "get-url", "origin"],
-            cwd=ws, capture_output=True, text=True, timeout=2.0
+            cwd=ws,
+            capture_output=True,
+            text=True,
+            timeout=2.0,
         ).stdout.strip()
         branch = subprocess.run(
-            ["git", "branch", "--show-current"],
-            cwd=ws, capture_output=True, text=True, timeout=2.0
+            ["git", "branch", "--show-current"], cwd=ws, capture_output=True, text=True, timeout=2.0
         ).stdout.strip()
         return remote or "No remote configured", branch or "main"
     except Exception:
@@ -332,7 +346,10 @@ def _stream_rich(messages: list, model: str) -> list[str]:
         with Live(
             Panel(
                 Markdown("Thinking..."),
-                title=f"[bold red]■ WORKING (Ctrl+C to Stop)[/bold red] │ [bold magenta]MUSE ({model})[/bold magenta]",
+                title=(
+                    "[bold red]■ WORKING (Ctrl+C to Stop)[/bold red] │ "
+                    f"[bold magenta]MUSE ({model})[/bold magenta]"
+                ),
                 border_style="magenta",
             ),
             refresh_per_second=8,
@@ -363,14 +380,20 @@ def _stream_rich(messages: list, model: str) -> list[str]:
                 live.update(
                     Panel(
                         Markdown("".join(full_text)),
-                        title=f"[bold red]■ WORKING[/bold red] │ [bold magenta]MUSE ({model})[/bold magenta]",
+                        title=(
+                            "[bold red]■ WORKING[/bold red] │ "
+                            f"[bold magenta]MUSE ({model})[/bold magenta]"
+                        ),
                         border_style="magenta",
                     )
                 )
             live.update(
                 Panel(
                     Markdown("".join(full_text)),
-                    title=f"[bold blue]● IDLE / READY[/bold blue] │ [bold magenta]MUSE ({model})[/bold magenta]",
+                    title=(
+                        "[bold blue]● IDLE / READY[/bold blue] │ "
+                        f"[bold magenta]MUSE ({model})[/bold magenta]"
+                    ),
                     border_style="blue",
                 )
             )
@@ -426,7 +449,7 @@ def _stream_ansi(messages: list, model: str) -> list[str]:
 
 def _format_model_row(table, m, current_model: str, rich: Any = False) -> None:
     """Print or add a single model row depending on available output mode."""
-    is_active = (m.id == current_model)
+    is_active = m.id == current_model
     if rich:
         stat = "[bold green]➜ Active[/bold green]" if is_active else ""
         table.add_row(stat, m.id, getattr(m, "kind", "chat"), "4B Free Web Tokens")
@@ -451,7 +474,9 @@ def _print_model_header(table, rich: Any, w: int) -> None:
         console.print()
         console.print(table)
         console.print(" [yellow]• Switch in chat:[/yellow]  [bold]/model <model_id>[/bold]")
-        console.print(" [yellow]• Switch from CLI:[/yellow] [bold]muse -m <model_id> [prompt][/bold]\n")
+        console.print(
+            " [yellow]• Switch from CLI:[/yellow] [bold]muse -m <model_id> [prompt][/bold]\n"
+        )
     else:
         print(f"{BOLD}{C_BLUE}" + "═" * w + f"{RST}")
         print(f"  {BOLD}{C_WHITE}Available Models (muse.ai Web Gateway - 4B Free Tokens){RST}")
@@ -511,7 +536,10 @@ def _handle_git(prompt: str) -> None:
             console.print(
                 Panel(
                     output.strip(),
-                    title=f"[bold blue]⚡ Git: git {' '.join(args)} (Exit: {res.returncode})[/bold blue]",
+                    title=(
+                        "[bold blue]⚡ Git: git "
+                        f"{' '.join(args)} (Exit: {res.returncode})[/bold blue]"
+                    ),
                     border_style="blue",
                 )
             )
@@ -545,7 +573,10 @@ def _handle_model_switch(prompt: str) -> str:
     if len(parts) > 1 and parts[1].strip():
         new_m = parts[1].strip()
         if HAVE_RICH and console:
-            console.print(f"[bold green]✓ Active model switched to: [bold cyan]{new_m}[/bold cyan][/bold green]\n")
+            console.print(
+                "[bold green]✓ Active model switched to: [bold cyan]"
+                f"{new_m}[/bold cyan][/bold green]\n"
+            )
         else:
             print(f"\n{C_GREEN}✓ Active model switched to: {BOLD}{new_m}{RST}\n")
         return new_m
@@ -719,23 +750,42 @@ def _handle_status_cmd(prompt_lower, prompt, model, history, last_reply):
 
 
 def _handle_restart_cmd(prompt_lower, prompt, model, history, last_reply):
-    """Handle /restart, restart, /start, start, server start commands to refresh gateway and connection."""
+    """Handle /restart or /start commands to refresh gateway and connection."""
     triggers = (
-        "/restart", "restart", "/reset", "reset", "/renew",
-        "/start", "start", "server start", "start server", "start muse2api"
+        "/restart",
+        "restart",
+        "/reset",
+        "reset",
+        "/renew",
+        "/start",
+        "start",
+        "server start",
+        "start server",
+        "start muse2api",
     )
-    if prompt_lower in triggers or any(prompt_lower.startswith(pfx) for pfx in ("start", "server start", "satrt")):
+    if prompt_lower in triggers or any(
+        prompt_lower.startswith(pfx) for pfx in ("start", "server start", "satrt")
+    ):
         if HAVE_RICH and console:
-            console.print("\n[bold yellow]↻ Checking and refreshing Muse gateway connection...[/bold yellow]")
+            console.print(
+                "\n[bold yellow]↻ Checking and refreshing Muse gateway connection...[/bold yellow]"
+            )
         else:
             print("\n↻ Checking and refreshing Muse gateway connection...")
         ensure_gateway()
         try:
-            httpx.post(f"{GATEWAY_BASE}/admin/accounts/renew_all", headers={"Authorization": f"Bearer {ADMIN_KEY}"}, timeout=5.0)
+            httpx.post(
+                f"{GATEWAY_BASE}/admin/accounts/renew_all",
+                headers={"Authorization": f"Bearer {ADMIN_KEY}"},
+                timeout=5.0,
+            )
         except Exception:
             pass
         if HAVE_RICH and console:
-            console.print("[bold green]✓ Gateway connection verified and tabs renewed. State: [bold blue]● IDLE / READY[/bold blue][/bold green]\n")
+            console.print(
+                "[bold green]✓ Gateway connection verified and tabs renewed. "
+                "State: [bold blue]● IDLE / READY[/bold blue][/bold green]\n"
+            )
         else:
             print("✓ Gateway connection verified and tabs renewed. State: ● IDLE / READY\n")
         return "continue", history, last_reply, model
@@ -749,10 +799,14 @@ def _handle_compact_cmd(prompt_lower, prompt, model, history, last_reply):
         history = compact_history(history, max_turns=3)
         if HAVE_RICH and console:
             console.print(
-                f"[bold green]✓ Conversation history compacted ({orig_len} ➜ {len(history)} messages).[/bold green]\n"
+                "[bold green]✓ Conversation history compacted "
+                f"({orig_len} ➜ {len(history)} messages).[/bold green]\n"
             )
         else:
-            print(f"\n{C_GREEN}✓ Conversation history compacted ({orig_len} ➜ {len(history)} messages).{RST}\n")
+            print(
+                f"\n{C_GREEN}✓ Conversation history compacted "
+                f"({orig_len} ➜ {len(history)} messages).{RST}\n"
+            )
         return "continue", history, last_reply, model
     return None
 
@@ -827,16 +881,22 @@ def _print_start_banner(ws, remote: str, branch: str, model: str) -> None:
     """Print the session start banner (Rich panel or plain ANSI)."""
     if HAVE_RICH and console:
         info_panel = (
-            f"[bold cyan]Model:[/bold cyan] {model}  │  [bold green]Tokens:[/bold green] 4B Free Web Tier\n"
+            "[bold cyan]Model:[/bold cyan] "
+            f"{model}  │  [bold green]Tokens:[/bold green] 4B Free Web Tier\n"
             f"[bold cyan]Workspace:[/bold cyan] {ws}\n"
             f"[bold cyan]GitHub:[/bold cyan]    {remote} [magenta]({branch})[/magenta]\n"
-            f"[bold yellow]Commands:[/bold yellow] /git <cmd>, /open <file>, /save <file>, /search <query>, /compact, /help\n"
-            f"[dim cyan]Editor Tip: Enter sends │ Shift+Return (or Option+Return / line ending with \\) for new line[/dim cyan]"
+            "[bold yellow]Commands:[/bold yellow] /git <cmd>, /open <file>, "
+            "/save <file>, /search <query>, /compact, /help\n"
+            "[dim cyan]Editor Tip: Enter sends │ Shift+Return (or Option+Return "
+            "/ line ending with \\) for new line[/dim cyan]"
         )
         console.print(
             Panel(
                 info_panel,
-                title="[bold blue]Muse.ai Terminal Workspace Bridge [green]● ACTIVE[/green][/bold blue]",
+                title=(
+                    "[bold blue]Muse.ai Terminal Workspace Bridge "
+                    "[green]● ACTIVE[/green][/bold blue]"
+                ),
                 border_style="blue",
             )
         )
@@ -844,12 +904,31 @@ def _print_start_banner(ws, remote: str, branch: str, model: str) -> None:
     w = _term_width()
     print(f"\n{BOLD}{C_BLUE}" + "═" * w + f"{RST}")
     print(f"  {BOLD}{C_WHITE}Muse.ai Terminal Workspace Bridge{RST} {C_GREEN}● ACTIVE{RST}")
-    print(f"  {C_GRAY}Model:{RST} {BOLD}{C_CYAN}{model}{RST}  │  {C_GRAY}Tokens:{RST} {BOLD}{C_GREEN}4B Free Tier{RST}")
+    print(
+        f"  {C_GRAY}Model:{RST} {BOLD}{C_CYAN}{model}{RST}  │  "
+        f"{C_GRAY}Tokens:{RST} {BOLD}{C_GREEN}4B Free Tier{RST}"
+    )
     print(f"  {C_GRAY}Workspace:{RST} {C_WHITE}{ws}{RST}")
     print(f"  {C_GRAY}GitHub:{RST}    {C_YELLOW}{remote}{RST} {C_PURPLE}[{branch}]{RST}")
-    print(f"  {C_GRAY}Shortcuts:{RST} {C_CYAN}/git <cmd>{RST}, {C_CYAN}/open <file>{RST}, {C_CYAN}/save <file>{RST}, {C_CYAN}/help{RST}")
-    print(f"  {C_GRAY}Editor:{RST}    {C_YELLOW}Enter sends │ Shift+Return or Option+Return for newline{RST}")
+    print(
+        f"  {C_GRAY}Shortcuts:{RST} {C_CYAN}/git <cmd>{RST}, {C_CYAN}/open <file>{RST}, "
+        f"{C_CYAN}/save <file>{RST}, {C_CYAN}/help{RST}"
+    )
+    print(
+        f"  {C_GRAY}Editor:{RST}    {C_YELLOW}Enter sends │ Shift+Return "
+        f"or Option+Return for newline{RST}"
+    )
     print(f"{BOLD}{C_BLUE}" + "═" * w + f"{RST}\n")
+
+
+def _read_user_prompt(session, prompt_indicator: str) -> str:
+    """Read one user prompt from the session prompt or stdin fallback."""
+    if session is not None and sys.stdin.isatty():
+        return session.prompt(
+            ANSI(prompt_indicator),
+            prompt_continuation=ANSI("\033[2m  ... \033[0m"),
+        ).strip()
+    return input(prompt_indicator).strip()
 
 
 def interactive_chat(model: str = DEFAULT_MODEL):
@@ -867,13 +946,7 @@ def interactive_chat(model: str = DEFAULT_MODEL):
     while True:
         try:
             prompt_indicator = f"\033[1;34m●\033[0m [{current_model}] You > "
-            if session is not None and sys.stdin.isatty():
-                prompt = session.prompt(
-                    ANSI(prompt_indicator),
-                    prompt_continuation=ANSI("\033[2m  ... \033[0m"),
-                ).strip()
-            else:
-                prompt = input(prompt_indicator).strip()
+            prompt = _read_user_prompt(session, prompt_indicator)
             if not prompt:
                 continue
 
@@ -901,7 +974,9 @@ def interactive_chat(model: str = DEFAULT_MODEL):
 
 def _fetch_account_quota(headers: dict, account_id: str) -> dict:
     """Fetch quota for a single account."""
-    q = httpx.get(f"{GATEWAY_BASE}/admin/accounts/{account_id}/quota", headers=headers, timeout=10.0)
+    q = httpx.get(
+        f"{GATEWAY_BASE}/admin/accounts/{account_id}/quota", headers=headers, timeout=10.0
+    )
     return q.json().get("quota", {}) if q.status_code == 200 else {}
 
 
@@ -921,7 +996,7 @@ def show_status():
         acc = httpx.get(f"{GATEWAY_BASE}/admin/accounts", headers=headers, timeout=5.0).json()
         accounts = acc.get("data", acc) if isinstance(acc, dict) else acc
         if HAVE_RICH and console is not None:
-            _show_status_rich(headers, accounts, h)
+            _show_status_rich(headers, accounts)
         else:
             _show_status_plain(headers, accounts, h)
     except Exception as e:
@@ -951,8 +1026,9 @@ def _show_status_plain(headers: dict, accounts: list, h) -> None:
     print(f"\nGateway Health: {h.status_code} ({h.text})")
     for a in accounts:
         qd = _fetch_account_quota(headers, a.get("id"))
-        _render_status_account(None, False, a.get("label", "default"),
-                               a.get("status", "unknown"), qd)
+        _render_status_account(
+            None, False, a.get("label", "default"), a.get("status", "unknown"), qd
+        )
     print()
 
 

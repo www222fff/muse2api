@@ -60,31 +60,33 @@ _TOOL_ITEMS = {"function_call", "function_call_output", "reasoning", "computer_c
                "file_search_call", "web_search_call"}
 
 
+def _input_item_to_message(item) -> dict:
+    """Convert one Responses ``input`` list item to a chat-style message."""
+    if not isinstance(item, dict):
+        raise InvalidRequest("input items must be objects")
+    itype = item.get("type")
+    if itype in _TOOL_ITEMS:
+        raise InvalidRequest(
+            f"input item type '{itype}' is not supported: "
+            "muse.ai has no function calling")
+    if "role" in item or itype in ("message", None):
+        return {"role": item.get("role", "user"),
+                "content": item.get("content")}
+    raise InvalidRequest(f"unsupported input item type '{itype}'")
+
+
 def _to_messages(body: ResponseRequest) -> list[dict]:
     """Convert Responses ``input`` / ``instructions`` to chat-style messages."""
     messages: list[dict] = []
     if body.instructions:
         messages.append({"role": "system", "content": body.instructions})
     inp = body.input
-    if inp is None or (isinstance(inp, str) and not inp.strip()):
-        pass
-    elif isinstance(inp, str):
-        messages.append({"role": "user", "content": inp})
+    if isinstance(inp, str):
+        if inp.strip():
+            messages.append({"role": "user", "content": inp})
     elif isinstance(inp, list):
-        for item in inp:
-            if not isinstance(item, dict):
-                raise InvalidRequest("input items must be objects")
-            itype = item.get("type")
-            if itype in _TOOL_ITEMS:
-                raise InvalidRequest(
-                    f"input item type '{itype}' is not supported: "
-                    "muse.ai has no function calling")
-            if "role" in item or itype in ("message", None):
-                messages.append({"role": item.get("role", "user"),
-                                 "content": item.get("content")})
-            else:
-                raise InvalidRequest(f"unsupported input item type '{itype}'")
-    else:
+        messages.extend(_input_item_to_message(item) for item in inp)
+    elif inp is not None:
         raise InvalidRequest("input must be a string or a list of items")
     return messages
 
@@ -218,7 +220,7 @@ async def create_response(body: ResponseRequest, request: Request,
                                                      produced, flat.text)})
         except Muse2APIError as exc:
             yield _sse(exc.to_body())
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("responses stream crashed")
             yield _sse({"error": {"message": "internal error", "type": "server_error"}})
         finally:
