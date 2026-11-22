@@ -6,7 +6,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncIterator
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse
 from ...core.media import load_image_ref
 from ...core.models import resolve_model
 from ...core.prompt import flatten_messages, message_turns
+from ...core.tools import extract_tool_calls
 from ...drivers.base import ChatRequest, InputImage
 from ...errors import InvalidRequest, Muse2APIError
 from ...services.container import Services
@@ -52,13 +53,8 @@ async def _build_chat_request(request: Request, body: ChatCompletionRequest,
 
 
 def _completion_payload(completion_id: str, created: int, model_name: str,
-                        text: str, prompt_text: str):
+                        text: str, prompt_text: str) -> dict:
     """Assemble the non-streaming chat completion response."""
-    usage = {
-        "prompt_tokens": _approx_tokens(prompt_text),
-        "completion_tokens": _approx_tokens(text),
-        "total_tokens": _approx_tokens(prompt_text) + _approx_tokens(text),
-    }
     return {
         "id": completion_id,
         "object": "chat.completion",
@@ -66,8 +62,93 @@ def _completion_payload(completion_id: str, created: int, model_name: str,
         "model": model_name,
         "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
                      "finish_reason": "stop"}],
-        "usage": usage,
+        "usage": _usage(prompt_text, text),
     }
+
+
+def _usage(prompt_text: str, completion_text: str) -> dict:
+    pt = _approx_tokens(prompt_text)
+    ct = _approx_tokens(completion_text)
+    return {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct}
+
+
+def _tool_calls_payload(completion_id: str, created: int, model_name: str,
+                        text: str, tool_calls: list[dict[str, Any]],
+                        prompt_text: str) -> dict:
+    """Assemble a non-streaming completion that ends in tool calls."""
+    return {
+        "id": completion_id,
+        "object": "chat.completion",
+        "created": created,
+        "model": model_name,
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": text,
+                "tool_calls": tool_calls,
+            },
+            "finish_reason": "tool_calls",
+        }],
+        "usage": _usage(prompt_text, text),
+    }
+
+
+def _tool_deltas(tool_calls: list[dict[str, Any]]) -> list[dict]:
+    """Render tool calls as streaming delta fragments."""
+    out = []
+    for i, tc in enumerate(tool_calls):
+        out.append({
+            "index": i,
+            "id": tc["id"],
+            "type": "function",
+            "function": {
+                "name": tc["function"]["name"],
+                "arguments": tc["function"]["arguments"],
+            },
+        })
+    return out
+
+
+def _tool_calls_chunk(completion_id: str, created: int, model_name: str,
+                      remaining: str, tool_calls: list[dict[str, Any]]) -> bytes:
+    return _sse({
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model_name,
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "role": "assistant",
+                "content": remaining,
+                "tool_calls": _tool_deltas(tool_calls),
+            },
+            "finish_reason": None,
+        }],
+    })
+
+
+def _tool_calls_finish(completion_id: str, created: int, model_name: str) -> bytes:
+    return _sse({
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model_name,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+    })
+
+
+def _usage_chunk(completion_id: str, created: int, model_name: str,
+                 prompt_text: str, completion_text: str) -> bytes:
+    return _sse({
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model_name,
+        "choices": [],
+        "usage": _usage(prompt_text, completion_text),
+    })
 
 
 async def _collect_first(stream, svc):
@@ -94,13 +175,31 @@ async def _collect_first(stream, svc):
             pending.cancel()
 
 
+def _available_tool_names(body: ChatCompletionRequest) -> list[str]:
+    return [
+        t.get("function", t).get("name") for t in (body.tools or []) if isinstance(t, dict)
+    ]
+
+
+async def _non_streaming(stream, body: ChatCompletionRequest, flat, completion_id: str,
+                         created: int, model_name: str) -> dict:
+    """Non-streaming completion, with optional tool-call reconstruction."""
+    text = "".join([d async for d in stream])
+    if body.tools:
+        tool_calls, remaining = extract_tool_calls(text, _available_tool_names(body))
+        if tool_calls:
+            return _tool_calls_payload(completion_id, created, model_name,
+                                       remaining or "", tool_calls, flat.text)
+    return _completion_payload(completion_id, created, model_name, text, flat.text)
+
+
 @router.post("/v1/chat/completions")
 async def chat_completions(body: ChatCompletionRequest, request: Request,
                            svc: Annotated[Services, Depends(get_services)]):
     request.state.model = body.model  # logged even if it does not resolve
     spec = resolve_model(body.model, "chat")
     request.state.model = body.model or spec.id
-    flat = flatten_messages([m.model_dump() for m in body.messages])
+    flat = flatten_messages([m.model_dump() for m in body.messages], tools=body.tools)
     if not flat.text and not flat.images:
         raise InvalidRequest("messages contain no text or images")
 
@@ -111,13 +210,48 @@ async def chat_completions(body: ChatCompletionRequest, request: Request,
     stream = svc.gateway.chat_stream(req)
 
     if not body.stream:
-        text = "".join([d async for d in stream])
-        return _completion_payload(completion_id, created, model_name, text, flat.text)
+        return await _non_streaming(stream, body, flat, completion_id, created, model_name)
+
+    return await _streaming(stream, svc, body, flat, completion_id, created, model_name, cancel)
+
+
+async def _streaming(stream, svc, body: ChatCompletionRequest, flat, completion_id: str,
+                     created: int, model_name: str, cancel) -> StreamingResponse:
+    """Build the streaming SSE response (with or without first-delta pre-fetch)."""
+    available_tool_names = _available_tool_names(body)
 
     def chunk(delta: dict, finish: str | None = None) -> dict:
-        return {"id": completion_id, "object": "chat.completion.chunk", "created": created,
-                "model": model_name,
-                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+        return {
+            "id": completion_id, "object": "chat.completion.chunk", "created": created,
+            "model": model_name,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+        }
+
+    async def _stream_tools() -> AsyncIterator[bytes]:
+        """Streamed chat with tool extraction (full output is buffered)."""
+        produced = ""
+        async for delta in stream:
+            produced += delta
+        tool_calls, remaining = extract_tool_calls(produced, available_tool_names)
+        if tool_calls:
+            yield _tool_calls_chunk(completion_id, created, model_name, remaining or "", tool_calls)
+            yield _tool_calls_finish(completion_id, created, model_name)
+        else:
+            yield _sse(chunk({"role": "assistant", "content": produced}))
+            yield _sse(chunk({}, "stop"))
+        if (body.stream_options or {}).get("include_usage"):
+            yield _usage_chunk(completion_id, created, model_name, flat.text, produced)
+
+    async def _stream_plain(first: str) -> AsyncIterator[bytes]:
+        """Streamed chat without tool extraction (deltas are forwarded)."""
+        produced = first or ""
+        yield _sse(chunk({"role": "assistant", "content": produced}))
+        async for delta in stream:
+            produced += delta
+            yield _sse(chunk({"content": delta}))
+        yield _sse(chunk({}, "stop"))
+        if (body.stream_options or {}).get("include_usage"):
+            yield _usage_chunk(completion_id, created, model_name, flat.text, produced)
 
     async def events(first: str | None) -> AsyncIterator[bytes]:
         # ``first`` is the pre-fetched first delta when heartbeats are disabled;
@@ -128,19 +262,12 @@ async def chat_completions(body: ChatCompletionRequest, request: Request,
                 first, heartbeats = await _collect_first(stream, svc)
                 for beat in heartbeats:
                     yield beat
-            produced = first or ""
-            yield _sse(chunk({"role": "assistant", "content": produced}))
-            async for delta in stream:
-                produced += delta
-                yield _sse(chunk({"content": delta}))
-            yield _sse(chunk({}, "stop"))
-            if (body.stream_options or {}).get("include_usage"):
-                usage = {"prompt_tokens": _approx_tokens(flat.text),
-                         "completion_tokens": _approx_tokens(produced)}
-                usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
-                yield _sse({"id": completion_id, "object": "chat.completion.chunk",
-                            "created": created, "model": model_name, "choices": [],
-                            "usage": usage})
+            if body.tools:
+                async for ev in _stream_tools():
+                    yield ev
+            else:
+                async for ev in _stream_plain(first):
+                    yield ev
         except Muse2APIError as exc:
             yield _sse(exc.to_body())
         except Exception:

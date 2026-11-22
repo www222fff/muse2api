@@ -12,8 +12,7 @@ mkdir -p data/logs data/browser-profile
 rm -f data/browser-profile/Singleton* 2>/dev/null || true
 
 echo "Starting muse2api gateway on http://127.0.0.1:18610..."
-source .venv/bin/activate
-nohup python -m muse2api > data/logs/gateway.log 2>&1 &
+nohup .venv/bin/python -m muse2api > data/logs/gateway.log 2>&1 &
 PID=$!
 echo $PID > data/gateway.pid
 echo "Gateway running with PID: $PID"
