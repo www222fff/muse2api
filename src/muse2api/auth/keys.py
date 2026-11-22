@@ -18,6 +18,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -45,7 +46,7 @@ class ApiKey(BaseModel):
     revoked: bool = False
     note: str = ""
 
-    def public(self) -> dict:
+    def public(self) -> dict[str, Any]:
         """Serialisable view without the hash."""
         return self.model_dump(mode="json", exclude={"hash"})
 

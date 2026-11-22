@@ -17,6 +17,7 @@ import sqlite3
 import threading
 import time
 from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +66,19 @@ WINDOWS = {"1h": (3600, 60), "24h": (86400, 1800), "7d": (7 * 86400, 3 * 3600)}
 
 STATUS_CLASSES = ("2xx", "3xx", "4xx", "5xx")
 STATUS_FILTERS = (*STATUS_CLASSES, "failed")
+
+
+@dataclass(frozen=True)
+class RequestQuery:
+    """Filter bundle for ``RequestLog.query``."""
+    key_id: str | None = None
+    account_id: str | None = None
+    status: str | None = None
+    path: str | None = None
+    since: float | None = None
+    hide_polls: bool = False
+    limit: int = 100
+    offset: int = 0
 
 
 def note_account(account_id: str) -> None:
@@ -188,31 +202,28 @@ class RequestLog:
         return cur.rowcount
 
     # ---- reads ----
-    async def query(self, *, key_id: str | None = None, account_id: str | None = None,
-                    status: str | None = None, path: str | None = None,
-                    since: float | None = None, hide_polls: bool = False,
-                    limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    async def query(self, f: RequestQuery = RequestQuery()) -> dict[str, Any]:
         where, args = ["1=1"], []
-        if key_id:
+        if f.key_id:
             where.append("key_id = ?")
-            args.append(key_id)
-        if account_id:
+            args.append(f.key_id)
+        if f.account_id:
             where.append("account_id = ?")
-            args.append(account_id)
-        if status == "failed":
+            args.append(f.account_id)
+        if f.status == "failed":
             where.append(FAILED)
-        elif status in STATUS_CLASSES:
-            low = int(status[0]) * 100
+        elif f.status in STATUS_CLASSES:
+            low = int(f.status[0]) * 100
             where.append("status_code >= ? AND status_code < ?")
             args += [low, low + 100]
-        if path:
+        if f.path:
             where.append("path LIKE ? ESCAPE '\\'")
-            escaped = path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            escaped = f.path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             args.append(escaped + "%")
-        if since:
+        if f.since:
             where.append("ts >= ?")
-            args.append(since)
-        if hide_polls:
+            args.append(f.since)
+        if f.hide_polls:
             where.append("poll = 0")
         cond = " AND ".join(where)
 
@@ -220,7 +231,7 @@ class RequestLog:
             total = db.execute(f"SELECT COUNT(*) FROM requests WHERE {cond}", args).fetchone()[0]
             rows = db.execute(
                 f"SELECT * FROM requests WHERE {cond} ORDER BY id DESC LIMIT ? OFFSET ?",
-                [*args, limit, offset]).fetchall()
+                [*args, f.limit, f.offset]).fetchall()
             return {"data": [_row(r) for r in rows], "total": total}
 
         return await asyncio.to_thread(self._call, run)

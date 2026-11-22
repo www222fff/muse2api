@@ -245,19 +245,36 @@ def _used_pct(line: str) -> float | None:
     return value if 0 <= value <= 100 else None
 
 
+def _usage_section(text: str | None) -> list[str]:
+    """Return the dialog lines between the Usage and Language headings."""
+    normalized = unicodedata.normalize("NFKC", text or "")
+    lines = [ln.strip() for ln in normalized.splitlines() if ln.strip()]
+    start = next((i + 1 for i, ln in enumerate(lines) if ln.lower() in _USAGE_HEADINGS), 0)
+    lines = lines[start:]
+    end = next((i for i, ln in enumerate(lines) if ln.lower() in _LANGUAGE_HEADINGS), len(lines))
+    return lines[:end]
+
+
+def _extra_tokens_left(lines: list[str]) -> str | None:
+    """Extract the leftover 'additional tokens' reading from a line list."""
+    for ln in lines:
+        if m := re.search(r"\(([^)]+)\)", ln):
+            return m.group(1).strip()
+        if _used_pct(ln) is not None:
+            continue
+        if re.search(r"\b\d+[A-Z]?\s+(?:tokens?|令牌|憑證|代幣)"
+                     r"(?:\s+(?:left|remaining))?\b", ln, re.IGNORECASE):
+            return ln.strip()
+    return None
+
+
 def parse_usage_text(text: str | None) -> dict[str, Any]:
     """Parse the settings dialog's Usage section (English / zh-CN / zh-TW).
 
     Returns ``plan``, ``weekly_used_pct``, ``resets_at``, ``extra_left`` (each None when
     absent) and ``found``, which is True only when the weekly usage percentage was
     read: a plan label alone, or only the extra-token line, is not a quota reading."""
-    normalized = unicodedata.normalize("NFKC", text or "")
-    lines = [ln.strip() for ln in normalized.splitlines() if ln.strip()]
-    # Skip profile/account text above Usage and everything from Language on.
-    start = next((i + 1 for i, ln in enumerate(lines) if ln.lower() in _USAGE_HEADINGS), 0)
-    lines = lines[start:]
-    end = next((i for i, ln in enumerate(lines) if ln.lower() in _LANGUAGE_HEADINGS), len(lines))
-    lines = lines[:end]
+    lines = _usage_section(text)
     joined = "\n".join(lines)
 
     out: dict[str, Any] = {"plan": None, "weekly_used_pct": None, "resets_at": None,
@@ -268,15 +285,6 @@ def parse_usage_text(text: str | None) -> dict[str, Any]:
     extra_at = next((i for i, ln in enumerate(lines) if _EXTRA.match(ln)), len(lines))
     out["weekly_used_pct"] = next(
         (v for ln in lines[:extra_at] if (v := _used_pct(ln)) is not None), None)
-    for ln in lines[extra_at:]:
-        if left := re.search(r"\(([^)]+)\)", ln):
-            out["extra_left"] = left.group(1).strip()
-            break
-        if _used_pct(ln) is not None:
-            continue
-        if re.search(r"\b\d+[A-Z]?\s+(?:tokens?|令牌|憑證|代幣)"
-                     r"(?:\s+(?:left|remaining))?\b", ln, re.IGNORECASE):
-            out["extra_left"] = ln.strip()
-            break
+    out["extra_left"] = _extra_tokens_left(lines[extra_at:])
     out["found"] = out["weekly_used_pct"] is not None
     return out

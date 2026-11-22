@@ -16,7 +16,7 @@ import time
 from collections import defaultdict
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
-from typing import Protocol
+from typing import Any, Protocol, cast
 
 from ..errors import NoAccountAvailable, UpstreamAuthError, UpstreamQuotaError, UpstreamTimeout
 from .model import Account, AccountStatus
@@ -31,10 +31,13 @@ on a VM that is not RUNNING stalls for minutes."""
 
 
 def _kind_blocked_until(acc: Account, kind: str) -> float:
-    return float((acc.meta.get("kind_blocked_until") or {}).get(kind, 0.0))
+    blocked = acc.meta.get("kind_blocked_until")
+    if isinstance(blocked, dict):
+        return float(cast(dict[str, Any], blocked).get(kind, 0.0))
+    return 0.0
 
 
-def note_wake(acc: Account, session_meta: dict) -> None:
+def note_wake(acc: Account, session_meta: dict[str, Any]) -> None:
     """Apply the VM wake outcome of one session renewal (``session_meta`` is that
     renewal's ``SessionInfo.meta``) through the per-kind block in
     ``meta["kind_blocked_until"]``: an unconfirmed wake blocks video for
@@ -44,7 +47,12 @@ def note_wake(acc: Account, session_meta: dict) -> None:
     if ok is None:  # no wake attempted this time
         return
     now = time.time()
-    blocks = {k: t for k, t in (acc.meta.get("kind_blocked_until") or {}).items() if t > now}
+    blocks: dict[str, Any] = {}
+    raw_blocks = acc.meta.get("kind_blocked_until")
+    if isinstance(raw_blocks, dict):
+        for kind, until in cast(dict[str, Any], raw_blocks).items():
+            if until > now:
+                blocks[kind] = until
     ours = acc.meta.pop("wake_blocked_until", None)
     if not ok:
         until = now + WAKE_BLOCK_SECONDS
@@ -192,7 +200,9 @@ class AccountPool:
         earliest time a cooling account comes back, if any)."""
         now = time.time()
         excluded = set(exclude) | self._kind_blocked(kind, now)
-        free, busy, back_at = [], False, None
+        free: list[Account] = []
+        busy = False
+        back_at: float | None = None
         for acc in self._accounts.values():
             if acc.id in excluded or not acc.enabled or acc.status == AccountStatus.INVALID:
                 continue
@@ -284,7 +294,7 @@ class AccountPool:
             acc.status = AccountStatus.COOLING
             acc.cooldown_until = time.time() + self.cooldown
 
-    @asynccontextmanager  # pyrefly: ignore[deprecated]
+    @asynccontextmanager
     async def lease(
         self, *, exclude: Iterable[str] = (), hint: str | None = None, kind: str | None = None
     ) -> AsyncIterator[Lease]:

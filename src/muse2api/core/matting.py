@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import io
 import threading
+from typing import Any, cast
 
 from ..errors import FeatureNotImplemented
 
@@ -21,7 +22,7 @@ from ..errors import FeatureNotImplemented
 class Matting:
     def __init__(self, model: str) -> None:
         self.model = model
-        self._session = None
+        self._session: Any = None
         # Inference is CPU-bound and already multi-threaded; run one image at a time.
         self._lock = threading.Lock()
 
@@ -38,15 +39,17 @@ class Matting:
                 "pip install 'muse2api[matting]'"
             ) from exc
 
-        src = Image.open(io.BytesIO(data)).convert("RGB")
+        src: Any = Image.open(io.BytesIO(data)).convert("RGB")
         with self._lock:
-            if self._session is None:
-                self._session = new_session(self.model)
-            cut = remove(src, session=self._session)
+            session = self._session
+            if session is None:
+                session = new_session(self.model)
+                self._session = session
+            cut = cast(Any, remove(src, session=session))
 
         alpha = np.asarray(cut.getchannel("A"), dtype=np.float64) / 255.0
         rgb = np.asarray(src, dtype=np.float64) / 255.0
-        fg = estimate_foreground_ml(rgb, alpha)
+        fg = cast(Any, estimate_foreground_ml(rgb, alpha))
         rgba = np.dstack([np.clip(fg, 0.0, 1.0), alpha])
         buf = io.BytesIO()
         Image.fromarray((rgba * 255).round().astype(np.uint8), "RGBA").save(buf, "PNG")

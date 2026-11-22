@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from typing import Any
 
 from ..drivers.base import MuseDriver
 from ..errors import FeatureNotImplemented, UpstreamAuthError
@@ -20,7 +21,7 @@ from .pool import AccountPool, note_wake
 log = logging.getLogger(__name__)
 
 
-async def renew_account(pool: AccountPool, driver: MuseDriver, account_id: str) -> dict:
+async def renew_account(pool: AccountPool, driver: MuseDriver, account_id: str) -> dict[str, Any]:
     acc = pool.get(account_id)
     if acc is None:
         return {"ok": False, "error": "not found"}

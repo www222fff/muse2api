@@ -54,7 +54,7 @@ log = logging.getLogger(__name__)
 
 POLL_INTERVAL = 0.15
 STABLE_POLLS_DONE = 4
-STABLE_POLLS_FORCE = 12
+STABLE_POLLS_FORCE = 40
 # Past this many assistant bubbles the page gets slow and a new thread is cheaper.
 HOT_BUBBLE_LIMIT = 16
 # A new thread often shows "Connecting..." for 10-30s and then answers normally.
@@ -160,20 +160,40 @@ class BrowserDriver(MuseDriver):
                 "busy_tabs": sum(t.busy for t in tabs)}
 
     # ------------------------------------------------------------ tabs
+    def _best_idle_tab(self, idle: list[_Tab],
+                       prefer: Callable[[_Tab], bool] | None) -> _Tab | None:
+        """First idle tab matching ``prefer`` (any when ``prefer`` is None)."""
+        return next((t for t in idle if prefer is None or prefer(t)), None)
+
+    @staticmethod
+    def _fallback_tab(idle: list[_Tab]) -> _Tab:
+        """Idle tab without a conversation, else the first idle tab."""
+        return next((t for t in idle if not t.has_state), idle[0])
+
     def _claim_or_plan(self, account: Account, tabs: list[_Tab], limit: int,
                        prefer: Callable[[_Tab], bool] | None) -> tuple[_Tab | None, bool]:
         """Return (tab to use, or None; whether to open a fresh tab)."""
-        idle = sorted((t for t in tabs if not t.busy), key=lambda t: not t.warm)
+        idle = [t for t in tabs if not t.busy]
+        idle.sort(key=lambda t: not t.warm)
+        match = self._best_idle_tab(idle, prefer)
         can_open = len(tabs) + self._opening.get(account.id, 0) < limit
-        match = next((t for t in idle if prefer is None or prefer(t)), None)
-        if match or (idle and not can_open):
-            tab = match or next((t for t in idle if not t.has_state), idle[0])
+        if match is not None or (idle and not can_open):
+            tab = match if match is not None else self._fallback_tab(idle)
             tab.busy = True
             return tab, False
         if can_open:
             self._opening[account.id] = self._opening.get(account.id, 0) + 1
             return None, True
         return None, False
+
+    def _drop_dead_tabs(self, tabs: list[_Tab]) -> list[_Tab]:
+        """Remove closed/stale tabs from ``tabs`` and return them for disposal."""
+        dead: list[_Tab] = []
+        for t in [t for t in tabs
+                  if t.closed or (not t.busy and (t.stale or t.session.closed))]:
+            tabs.remove(t)
+            dead.append(t)
+        return dead
 
     async def _checkout(self, account: Account,
                         prefer: Callable[[_Tab], bool] | None = None) -> _Tab:
@@ -187,10 +207,7 @@ class BrowserDriver(MuseDriver):
         async with self._tab_cond:
             while True:
                 tabs = self._tabs.setdefault(account.id, [])
-                for t in [t for t in tabs
-                          if t.closed or (not t.busy and (t.stale or t.session.closed))]:
-                    tabs.remove(t)
-                    dead.append(t)
+                dead.extend(self._drop_dead_tabs(tabs))
                 tab, to_open = self._claim_or_plan(account, tabs, limit, prefer)
                 if tab is not None or to_open:
                     break
@@ -337,6 +354,22 @@ class BrowserDriver(MuseDriver):
         tab.image_count = 0
         tab.thread_url = ""
 
+    @staticmethod
+    def _restore_turns(hot: dict) -> list[tuple[str, str]]:
+        """Rebuild the saved turn list from a hot-page record."""
+        turns: list[tuple[str, str]] = []
+        for item in hot.get("turns") or []:
+            if isinstance(item, (list, tuple)) and len(item) == 2:
+                turns.append((str(item[0]), str(item[1])))
+        return turns
+
+    @staticmethod
+    def _parse_image_count(hot: dict) -> int:
+        try:
+            return int(hot.get("image_count") or 0)
+        except (TypeError, ValueError):
+            return 0
+
     def _load_hot(self, tab: _Tab, account: Account) -> None:
         """Restore the last conversation after a restart or a new browser tab."""
         if tab.turns or tab.thread_url:
@@ -344,17 +377,10 @@ class BrowserDriver(MuseDriver):
         hot = account.meta.get("hot_page")
         if not isinstance(hot, dict):
             return
-        turns = []
-        for item in hot.get("turns") or []:
-            if isinstance(item, (list, tuple)) and len(item) == 2:
-                turns.append((str(item[0]), str(item[1])))
-        tab.turns = turns
+        tab.turns = self._restore_turns(hot)
         tab.hint = hot.get("hint") or None
         tab.thread_url = str(hot.get("url") or "")
-        try:
-            tab.image_count = int(hot.get("image_count") or 0)
-        except (TypeError, ValueError):
-            tab.image_count = 0
+        tab.image_count = self._parse_image_count(hot)
 
     def _save_hot(self, tab: _Tab, account: Account, req: ChatRequest, url: str) -> None:
         if url:
@@ -375,27 +401,35 @@ class BrowserDriver(MuseDriver):
         except CDPError:
             return ""
 
-    async def _on_thread(self, tab: _Tab) -> bool:
-        """The open page is the saved conversation and can take another message."""
-        href = await self._href(tab)
+    def _same_thread(self, href: str, tab: _Tab) -> bool:
+        """``href`` is a real conversation page, matching the tab's saved thread."""
         if not is_thread_url(href):
             return False
         if tab.thread_url and urlsplit(href).path.rstrip("/") != urlsplit(tab.thread_url).path.rstrip("/"):
             return False
+        return True
+
+    def _chat_blocked(self, state: dict) -> bool:
+        """True when the page cannot take another message right now."""
+        if state.get("generating"):
+            return True
+        if any(hint in state.get("tail", "") for hint in dom.STALL_HINTS):
+            return True
+        return (state.get("agentCount") or 0) >= HOT_BUBBLE_LIMIT
+
+    async def _on_thread(self, tab: _Tab) -> bool:
+        """The open page is the saved conversation and can take another message."""
+        href = await self._href(tab)
+        if not self._same_thread(href, tab):
+            return False
         try:
             page = await tab.session.evaluate(dom.PAGE_STATE) or {}
-            if not page.get("hasInput"):
-                return False
-            if "Connecting..." in (page.get("head") or ""):
-                return False
             state = await self._state(tab)
         except CDPError:
             return False
-        if state.get("generating"):
+        if not (page.get("hasInput") and "Connecting..." not in (page.get("head") or "")):
             return False
-        if any(hint in state.get("tail", "") for hint in dom.STALL_HINTS):
-            return False
-        return (state.get("agentCount") or 0) < HOT_BUBBLE_LIMIT
+        return not self._chat_blocked(state)
 
     _SOFT_NAV_TIMEOUT = 8.0
 
@@ -511,13 +545,7 @@ class BrowserDriver(MuseDriver):
             )
         except CDPError:
             return False
-        if state.get("generating"):
-            return False
-        if any(hint in state.get("tail", "") for hint in dom.STALL_HINTS):
-            return False
-        if (state.get("agentCount") or 0) >= HOT_BUBBLE_LIMIT:
-            return False
-        return bool(present)
+        return bool(present) and not self._chat_blocked(state)
 
     async def _open_saved(self, tab: _Tab) -> None:
         tab.warm = False
@@ -570,6 +598,19 @@ class BrowserDriver(MuseDriver):
             return follow, images[tab.image_count:]
         return None
 
+    async def _try_continue(self, tab: _Tab, req: ChatRequest, hint: str,
+                            ) -> tuple[str, list[InputImage]] | None:
+        """Attempt to continue the saved conversation; None when a fresh thread is needed."""
+        same_owner = bool(hint) and (tab.hint or "") == hint
+        if not (tab.turns and same_owner):
+            return None
+        follow = followup_text(tab.turns, req.turns)
+        if not (follow and len(req.images) >= tab.image_count):
+            return None
+        if not (tab.thread_url or await self._live_continuation(tab)):
+            return None
+        return await self._continue_existing_thread(tab, follow, req.images)
+
     async def _resolve_thread(self, tab: _Tab, account: Account, req: ChatRequest,
                               hint: str) -> tuple[str, list[InputImage]]:
         """Decide whether to continue the tab's thread or open a fresh one."""
@@ -577,19 +618,12 @@ class BrowserDriver(MuseDriver):
         # tab while no other tab of the account already holds a conversation.
         if hint and not any(t.has_state for t in self._tabs.get(account.id, []) if t is not tab):
             self._load_hot(tab, account)
-        # An anonymous request never continues a thread, even if the tab
-        # it got (e.g. the at-limit fallback, or a restored hot page)
-        # happens to hold one: without an identity there is no way to
-        # know it is the same client. It opens a new thread instead and
-        # sends the full prompt, which keeps the model in context.
-        same_owner = bool(hint) and (tab.hint or "") == hint
-        follow = followup_text(tab.turns, req.turns) if tab.turns and same_owner else None
-        if follow and len(req.images) >= tab.image_count and (
-            tab.thread_url or await self._live_continuation(tab)
-        ):
-            continued = await self._continue_existing_thread(tab, follow, req.images)
-            if continued is not None:
-                return continued
+        continued = await self._try_continue(tab, req, hint)
+        if continued is not None:
+            return continued
+        # Anonymous requests never continue a thread, even if the tab happens to
+        # hold one: without an identity there is no way to know it is the same
+        # client, so open a new thread and send the full prompt instead.
         await self._open_fresh_thread(tab, account, hint)
         return req.prompt, req.images
 
@@ -664,6 +698,25 @@ class BrowserDriver(MuseDriver):
         stable: int = 0
         got_first: bool = False
 
+    @staticmethod
+    def _delta_after(text: str, previous: str) -> str:
+        if not previous:
+            return text
+        if text.startswith(previous):
+            return text[len(previous):]
+        idx = text.rfind(previous)
+        if idx >= 0:
+            return text[idx + len(previous):]
+        common = 0
+        limit = min(len(text), len(previous))
+        while common < limit and text[common] == previous[common]:
+            common += 1
+        if common >= int(len(previous) * 0.5):
+            return text[common:]
+        if len(text) > len(previous):
+            return text[len(previous):]
+        return ""
+
     async def _poll_stream(self, tab: _Tab, req: ChatRequest,
                            state: _StreamState) -> tuple[_StreamState, bool, str | None]:
         """Poll the tab once; returns (state, finished, delta)."""
@@ -677,23 +730,25 @@ class BrowserDriver(MuseDriver):
             await self._deny_approvals(tab)
             return state, False, None
         text = st.get("lastText", "")
-        is_new = st.get("agentCount", 0) > state.base_count or (text and text != state.base_text)
-        if not is_new or not text:
+        is_new_bubble = st.get("agentCount", 0) > state.base_count
+        has_new_text = bool(text and (is_new_bubble or text != state.base_text))
+        if not has_new_text:
             self._raise_if_stalled(elapsed, st)
             return state, False, None
-        if text != state.last:
+        finished = False
+        delta = None
+        if text == state.last:
+            state.stable += 1
+            state.got_first = True
+            finished = self._stream_settled(st, state.stable)
+        else:
             previous = state.emitted
             state.emitted = text
             state.last = text
             state.stable = 0
             state.got_first = True
-            delta = text[len(previous):] if text.startswith(previous) else text
-            return state, False, delta
-        state.stable += 1
-        state.got_first = True
-        if self._stream_settled(st, state.stable):
-            return state, True, None
-        return state, False, None
+            delta = self._delta_after(text, previous)
+        return state, finished, delta
 
     async def chat_stream(self, account: Account, req: ChatRequest) -> AsyncIterator[str]:
         tab, base = await self._begin_chat(account, req)
@@ -706,10 +761,10 @@ class BrowserDriver(MuseDriver):
         try:
             while True:
                 state, finished, delta = await self._poll_stream(tab, req, state)
-                if finished:
-                    return
                 if delta:
                     yield delta
+                if finished:
+                    return
         except CDPError as exc:
             await self._close_tab(tab)
             raise UpstreamError(f"browser error: {exc}") from exc
@@ -764,17 +819,24 @@ class BrowserDriver(MuseDriver):
         log.info("warm thread ready for account %s", account.id)
         return True
 
+    def _has_warm_slot(self, tabs: list[_Tab], pending: int) -> bool:
+        """The account still has warm threads missing (counting ``pending`` ones)."""
+        return sum(t.warm for t in tabs) + pending < self.settings.warm_threads
+
+    def _free_slots(self, account: Account, tabs: list[_Tab]) -> int:
+        """Idle tabs left for warming once one tab per live request is reserved."""
+        idle = len([t for t in tabs if not (t.busy or t.stale or t.session.closed)])
+        limit = max(1, self.settings.account_max_concurrency)
+        return idle + limit - len(tabs) - self._opening.get(account.id, 0)
+
     async def _checkout_for_warming(self, account: Account, pending: int = 0) -> _Tab | None:
         """A tab to warm, but only while the account has warm threads missing (counting
         the ``pending`` ones being warmed) and a slot is still left for a real request."""
-        limit = max(1, self.settings.account_max_concurrency)
         async with self._tab_cond:
             tabs = [t for t in self._tabs.get(account.id, []) if not t.closed]
-            if sum(t.warm for t in tabs) + pending >= self.settings.warm_threads:
+            if not self._has_warm_slot(tabs, pending):
                 return None
-            idle = [t for t in tabs if not (t.busy or t.stale or t.session.closed)]
-            free = len(idle) + limit - len(tabs) - self._opening.get(account.id, 0)
-            if free < 2:
+            if self._free_slots(account, tabs) < 2:
                 return None
         return await self._checkout(account, prefer=lambda t: not t.has_state and not t.warm)
 
@@ -854,11 +916,9 @@ class BrowserDriver(MuseDriver):
                 and not st.get("generating")):
             ctx["text_done_at"] = None
             return "continue", None
-        now = time.monotonic()
         if ctx["text_done_at"] is None:
-            ctx["text_done_at"] = now
-            return "continue", None
-        if now - ctx["text_done_at"] < ctx["grace"]:
+            ctx["text_done_at"] = time.monotonic()
+        if time.monotonic() - ctx["text_done_at"] < ctx["grace"]:
             return "continue", None
         action, payload = await self._text_only_action(
             tab, kind, text, ctx["grace"], ctx["denied"], ctx["asked"])
@@ -871,21 +931,37 @@ class BrowserDriver(MuseDriver):
             return "link", {"src": payload, "kind": kind}
         raise UpstreamRefused(f"upstream replied with text only: {text[:200]}")
 
+    @staticmethod
+    def _fresh_attachment(new_atts: list[dict], kind: str) -> dict | None:
+        """First ready attachment of ``kind``, or None."""
+        for a in new_atts:
+            if a.get("src") and a.get("kind") == kind:
+                return a
+        return None
+
+    @staticmethod
+    def _has_pending_attachment(new_atts: list[dict], kind: str) -> bool:
+        """An attachment node for ``kind`` is present but its blob src is not ready."""
+        return any(kind in (a.get("tid") or "") for a in new_atts)
+
     async def _step_media(self, tab: _Tab, st: dict, kind: str,
                           ctx: dict) -> tuple[str, dict | None]:
         """Advance one media-wait iteration; returns (action, payload)."""
         new_atts = st.get("attachments", [])[ctx["base_atts"]:]
-        fresh = [a for a in new_atts if a.get("src") and a.get("kind") == kind]
-        if fresh:
-            return "fresh", fresh[-1]
-        ctx["busy"] = bool(st.get("generating")) or any(
-            kind in (a.get("tid") or "") for a in new_atts)
+        fresh = self._fresh_attachment(new_atts, kind)
+        if fresh is not None:
+            return "fresh", fresh
+        ctx["busy"] = bool(st.get("generating")) or self._has_pending_attachment(new_atts, kind)
         # An attachment node for this kind is on the page but its (blob) src
         # has not loaded yet -> media is still finalising, keep waiting.
-        if any(kind in (a.get("tid") or "") for a in new_atts):
+        if self._has_pending_attachment(new_atts, kind):
             ctx["text_done_at"] = None
             return "continue", None
         return await self._settle_text_only(tab, st, kind, ctx)
+
+    def _wait_expired(self, elapsed: float, timeout: float, ctx: dict) -> bool:
+        """The wait has run out and media is not visibly still finishing."""
+        return elapsed >= timeout and not (ctx["busy"] and elapsed < timeout * self._OVERRUN_FACTOR)
 
     async def _wait_media(self, tab: _Tab, base: dict, kind: str, timeout: float,
                           on_progress, cancel: asyncio.Event | None) -> dict:
@@ -901,7 +977,7 @@ class BrowserDriver(MuseDriver):
         started = time.monotonic()
         while True:
             elapsed = time.monotonic() - started
-            if elapsed >= timeout and not (ctx["busy"] and elapsed < timeout * self._OVERRUN_FACTOR):
+            if self._wait_expired(elapsed, timeout, ctx):
                 break
             if cancel and cancel.is_set():
                 raise asyncio.CancelledError
@@ -1056,18 +1132,30 @@ class BrowserDriver(MuseDriver):
             self._quota_cache[account.id] = snapshot
             return dict(snapshot)
 
+    def _idle_tabs(self, tabs: list[_Tab]) -> list[_Tab]:
+        """Tabs that are free for checkout."""
+        return [t for t in tabs if not (t.busy or t.stale or t.session.closed)]
+
+    @staticmethod
+    def _first_free_idle(idle: list[_Tab]) -> _Tab:
+        """Prefer a tab without a conversation; the dialog does not navigate anyway."""
+        return next((t for t in idle if not t.has_state), idle[0])
+
+    def _all_busy(self, tabs: list[_Tab], account: Account) -> bool:
+        """Every tab is serving or opening; a quota read must not take one over."""
+        return any(t.busy for t in tabs) or bool(self._opening.get(account.id))
+
     async def _checkout_idle(self, account: Account) -> _Tab:
         """An idle tab of ``account`` without waiting; a fresh tab only when the account
         has none open or opening. Raises ``AccountBusy`` when every tab is in use."""
         async with self._tab_cond:
             tabs = [t for t in self._tabs.get(account.id, []) if not t.closed]
-            idle = [t for t in tabs if not (t.busy or t.stale or t.session.closed)]
+            idle = self._idle_tabs(tabs)
             if idle:
-                # Prefer a tab without a conversation; the dialog does not navigate anyway.
-                tab = next((t for t in idle if not t.has_state), idle[0])
+                tab = self._first_free_idle(idle)
                 tab.busy = True
                 return tab
-            if any(t.busy for t in tabs) or self._opening.get(account.id):
+            if self._all_busy(tabs, account):
                 raise AccountBusy(f"account '{account.id}' is serving a request; "
                                   "try the quota again when it is idle")
         return await self._checkout(account, prefer=lambda t: not t.has_state)
@@ -1095,6 +1183,27 @@ class BrowserDriver(MuseDriver):
                     "windowsVirtualKeyCode": 27, "nativeVirtualKeyCode": 27})
             await asyncio.sleep(self._ESCAPE_PAUSE)
 
+    async def _poll_quota_dialog(self, tab: _Tab) -> dict:
+        """Poll the open settings dialog until it shows a usage percentage or times out."""
+        deadline = time.monotonic() + self._QUOTA_READ_TIMEOUT
+        while True:
+            parsed = dom.parse_usage_text(await tab.session.evaluate(dom.QUOTA_DIALOG_TEXT))
+            if parsed["found"] or time.monotonic() >= deadline:
+                return parsed
+            await asyncio.sleep(0.2)
+
+    async def _close_settings_dialog(self, tab: _Tab) -> None:
+        """Close the settings dialog; retire the tab if it will not close."""
+        try:
+            await self._escape(tab)
+            if await tab.session.evaluate(dom.QUOTA_DIALOG_TEXT):
+                tab.stale = True
+        except Exception:
+            tab.stale = True
+        if tab.stale:
+            log.warning("settings dialog stayed open on a tab of %s; retiring it",
+                        tab.account_id)
+
     async def _read_quota(self, tab: _Tab) -> dict[str, Any]:
         page = await tab.session.evaluate(dom.PAGE_STATE) or {}
         if not page.get("hasInput"):  # a fresh tab is still on about:blank
@@ -1105,21 +1214,8 @@ class BrowserDriver(MuseDriver):
                 return {**dom.parse_usage_text(""), "error": "settings entry not found"}
             if not await self._click_js(tab, dom.QUOTA_MENU_ITEM):
                 return {**dom.parse_usage_text(""), "error": "settings menu item not found"}
-            deadline = time.monotonic() + self._QUOTA_READ_TIMEOUT
-            while True:
-                parsed = dom.parse_usage_text(await tab.session.evaluate(dom.QUOTA_DIALOG_TEXT))
-                if parsed["found"] or time.monotonic() >= deadline:
-                    return parsed
-                await asyncio.sleep(0.2)
+            return await self._poll_quota_dialog(tab)
         finally:
             # Never hand a tab back with the dialog open: close it, and retire the
             # tab when that did not work.
-            try:
-                await self._escape(tab)
-                if await tab.session.evaluate(dom.QUOTA_DIALOG_TEXT):
-                    tab.stale = True
-            except Exception:
-                tab.stale = True
-            if tab.stale:
-                log.warning("settings dialog stayed open on a tab of %s; retiring it",
-                            tab.account_id)
+            await self._close_settings_dialog(tab)

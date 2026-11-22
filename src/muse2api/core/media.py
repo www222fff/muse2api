@@ -86,6 +86,18 @@ def _assert_public_url(url: str) -> str:
     return url
 
 
+def _is_private_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """True for any non-public address class (SSRF guard)."""
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
 async def _assert_public_host(hostname: str) -> None:
     """Reject hostnames resolving to non-public IPs (SSRF guard)."""
     try:
@@ -98,14 +110,7 @@ async def _assert_public_host(hostname: str) -> None:
         ip = ipaddress.ip_address(info[4][0])
         if ip.version == 6 and ip.ipv4_mapped is not None:
             ip = ip.ipv4_mapped
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_multicast
-            or ip.is_reserved
-            or ip.is_unspecified
-        ):
+        if _is_private_ip(ip):
             raise InvalidRequest("image_url must resolve to a public IP address")
 
 

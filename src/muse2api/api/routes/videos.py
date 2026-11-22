@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
 
 from ...core.media import load_image_ref
 from ...core.models import resolve_model
-from ...drivers.base import InputImage, VideoRequest
+from ...drivers.base import InputImage, ProgressCallback, VideoRequest
 from ...errors import NotFound
 from ...services.container import Services
 from ...services.tasks import Task
@@ -16,7 +16,7 @@ from ..schemas import VideoCreateRequest
 router = APIRouter(tags=["videos"], dependencies=[Depends(require_api_key)])
 
 
-def _task_view(task: Task) -> dict:
+def _task_view(task: Task) -> dict[str, Any]:
     return {
         "id": task.id,
         "object": "video",
@@ -31,7 +31,7 @@ def _task_view(task: Task) -> dict:
 
 @router.post("/v1/videos")
 async def create_video(body: VideoCreateRequest, request: Request,
-                       svc: Annotated[Services, Depends(get_services)]) -> dict:
+                       svc: Annotated[Services, Depends(get_services)]) -> dict[str, Any]:
     request.state.model = body.model  # logged even if it does not resolve
     spec = resolve_model(body.model, "video")
     request.state.model = body.model or spec.id
@@ -39,7 +39,7 @@ async def create_video(body: VideoCreateRequest, request: Request,
     first_frame = InputImage(*(await load_image_ref(frame_ref))) if frame_ref else None
     base = public_base(request)
 
-    async def runner(progress) -> dict:
+    async def runner(progress: ProgressCallback) -> dict[str, Any]:
         req = VideoRequest(prompt=body.prompt, model=spec.id, size=body.size,
                            duration=body.duration or body.seconds, first_frame=first_frame,
                            timeout=svc.settings.video_timeout, on_progress=progress)
@@ -48,7 +48,7 @@ async def create_video(body: VideoCreateRequest, request: Request,
         return {"url": f"{base}/v1/media/{name}", "mime": result.mime,
                 "width": result.width, "height": result.height}
 
-    request_meta = {"model": spec.id, "prompt": body.prompt, "size": body.size,
+    request_meta: dict[str, Any] = {"model": spec.id, "prompt": body.prompt, "size": body.size,
                     "duration": body.duration or body.seconds, "has_first_frame": bool(first_frame)}
     task = svc.tasks.submit("video", request_meta, runner)
     request.state.task_id = task.id
@@ -57,7 +57,7 @@ async def create_video(body: VideoCreateRequest, request: Request,
 
 @router.get("/v1/videos/{task_id}")
 async def get_video(task_id: str, request: Request,
-                    svc: Annotated[Services, Depends(get_services)]) -> dict:
+                    svc: Annotated[Services, Depends(get_services)]) -> dict[str, Any]:
     task = svc.tasks.get(task_id)
     if task is None or task.kind != "video":
         raise NotFound(f"video task '{task_id}' not found")

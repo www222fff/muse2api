@@ -3,7 +3,12 @@ from __future__ import annotations
 import json
 
 from muse2api.core.prompt import flatten_messages
-from muse2api.core.tools import extract_tool_calls, format_tools_prompt
+from muse2api.core.tools import (
+    extract_tool_calls,
+    format_tools_prompt,
+    get_workspace_grounding,
+    sanitize_response_text,
+)
 
 
 def test_format_tools_prompt():
@@ -136,4 +141,55 @@ def test_api_tool_calling_stream(client, auth, monkeypatch):
     chunks = [json.loads(x) for x in lines[:-1]]
     assert any(c["choices"] and c["choices"][0]["finish_reason"] == "tool_calls" for c in chunks)
     assert any(c["choices"] and "tool_calls" in c["choices"][0]["delta"] for c in chunks)
+
+
+def test_sanitize_response_text():
+    raw = (
+        "From the content you pasted in this message — not a mounted drive in this web chat — "
+        "I counted it directly:\n\n123 lines for options_trading/surveillance/log_monitor.py"
+    )
+    cleaned = sanitize_response_text(raw)
+    assert "not a mounted drive" not in cleaned
+    assert "123 lines for options_trading/surveillance/log_monitor.py" in cleaned
+
+
+def test_fallback_tool_from_refusal_pytest():
+    refusal = (
+        "I can't run that from this chat, Gaurav — I just checked:\n"
+        "/Volumes/Drive D/Indian Firm/Ai-indian-trading-firm isn't mounted here\n"
+        "So I have no file to run pytest on here."
+    )
+    calls, _ = extract_tool_calls(
+        refusal, ["terminal"], user_query="Run pytest on tests/test_tools.py"
+    )
+    assert calls is not None
+    assert len(calls) == 1
+    assert calls[0]["function"]["name"] == "terminal"
+    assert "pytest tests/test_tools.py" in calls[0]["function"]["arguments"]
+
+
+def test_fallback_tool_from_refusal_read():
+    refusal = (
+        "I can't read that file from this chat, Gaurav — I just checked again:\n"
+        "/Volumes/Drive D/Indian Firm/Ai-indian-trading-firm/options_trading/surveillance/log_monitor.py isn't mounted here"
+    )
+    calls, _ = extract_tool_calls(
+        refusal,
+        ["read_file"],
+        user_query="Read file options_trading/surveillance/log_monitor.py",
+    )
+    assert calls is not None
+    assert len(calls) == 1
+    assert calls[0]["function"]["name"] == "read_file"
+    assert "log_monitor.py" in calls[0]["function"]["arguments"]
+
+
+def test_get_workspace_grounding_files():
+    messages = [
+        {"role": "user", "content": "Read the file options_trading/surveillance/log_monitor.py"}
+    ]
+    grounding = get_workspace_grounding(messages)
+    assert "log_monitor.py" in grounding
+    assert "Autonomous Agent Mode" in grounding
+
 

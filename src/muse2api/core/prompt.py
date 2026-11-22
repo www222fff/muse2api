@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from .tools import format_tools_prompt, get_workspace_grounding
 
@@ -25,24 +25,24 @@ ROLE_LABELS = {
 @dataclass
 class FlatPrompt:
     text: str
-    images: list[str] = field(default_factory=list)
+    images: list[str] = field(default_factory=list[str])
     """Image references (data URLs or http(s) URLs) found in the messages, in order."""
 
 
-def _part_text(part: dict) -> str:
+def _part_text(part: dict[str, Any]) -> str:
     """Plain text of a single content part (empty for non-text parts)."""
     if part.get("type") in ("text", "input_text", "output_text"):
         return part.get("text", "")
     return ""
 
 
-def _part_image_ref(part: dict) -> list[str]:
+def _part_image_ref(part: dict[str, Any]) -> list[str]:
     """Image reference URLs carried by a content part (empty when none)."""
     if part.get("type") not in ("image_url", "input_image"):
         return []
     ref = part.get("image_url")
     if isinstance(ref, dict):
-        ref = ref.get("url")
+        ref = cast(dict[str, Any], ref).get("url")
     return [ref] if ref else []
 
 
@@ -56,9 +56,25 @@ def _content_to_text(content: Any, images: list[str]) -> str:
         if not isinstance(part, dict):
             parts.append(str(part))
             continue
-        images.extend(_part_image_ref(part))
-        parts.append(_part_text(part))
+        p = cast(dict[str, Any], part)
+        images.extend(_part_image_ref(p))
+        parts.append(_part_text(p))
     return "\n".join(p for p in parts if p)
+
+
+def _tool_call_text(tc: Any) -> str | None:
+    """Render a single tool_call entry as an XML tool-call line."""
+    if not isinstance(tc, dict):
+        return None
+    fn = cast(dict[str, Any], tc).get("function", {})
+    fn_dict = cast(dict[str, Any], fn) if isinstance(fn, dict) else None
+    if fn_dict is None:
+        return None
+    name = fn_dict.get("name", "")
+    args = fn_dict.get("arguments", "{}")
+    if isinstance(args, dict):
+        args = json.dumps(args, ensure_ascii=False)
+    return f"<tool_call>\n{{\"name\": \"{name}\", \"arguments\": {args}}}\n</tool_call>"
 
 
 def _message_to_text(msg: dict[str, Any], images: list[str]) -> str:
@@ -70,14 +86,11 @@ def _message_to_text(msg: dict[str, Any], images: list[str]) -> str:
     if content_text:
         parts.append(content_text)
 
-    if tool_calls and isinstance(tool_calls, list):
-        for tc in tool_calls:
-            fn = tc.get("function", {})
-            name = fn.get("name", "")
-            args = fn.get("arguments", "{}")
-            if isinstance(args, dict):
-                args = json.dumps(args, ensure_ascii=False)
-            parts.append(f"<tool_call>\n{{\"name\": \"{name}\", \"arguments\": {args}}}\n</tool_call>")
+    if isinstance(tool_calls, list):
+        for tc in cast(list[Any], tool_calls):
+            line = _tool_call_text(tc)
+            if line is not None:
+                parts.append(line)
 
     if role == "tool":
         name = msg.get("name") or msg.get("tool_call_id") or "tool"
@@ -110,7 +123,7 @@ def followup_text(previous: list[tuple[str, str]], incoming: list[tuple[str, str
     extra = list(incoming[len(previous) :])
     while extra and extra[0][0] in ("assistant", "tool"):
         extra = extra[1:]
-    user_text = []
+    user_text: list[str] = []
     for role, text in extra:
         if role != "user":
             return None

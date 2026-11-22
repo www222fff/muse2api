@@ -10,7 +10,7 @@ import asyncio
 import json
 import re
 import time
-from typing import Any
+from typing import Any, cast
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -40,14 +40,12 @@ def client_ip(scope: Scope) -> str | None:
 
 def _error_message(body: bytes) -> str | None:
     try:
-        data = json.loads(body)
+        data: dict[str, Any] = json.loads(body)
     except ValueError:
         text = body.decode("utf-8", "replace").strip()
         return text[:_MAX_ERROR_LEN] or None
-    if not isinstance(data, dict):
-        return None
-    err = data.get("error")
-    msg = err.get("message") if isinstance(err, dict) else err or data.get("detail")
+    err: Any = data.get("error")
+    msg: Any = (cast(dict[str, Any], err).get("message") if isinstance(err, dict) else err) or data.get("detail")
     return str(msg)[:_MAX_ERROR_LEN] if msg else None
 
 
@@ -63,23 +61,32 @@ class RequestLogMiddleware:
     def __init__(self, app: ASGIApp, request_log: RequestLog) -> None:
         self.app = app
         self.request_log = request_log
-        self._pending: set[asyncio.Task] = set()
+        self._pending: set[asyncio.Task[None]] = set()
+
+    def _record_start(self, record: dict[str, Any], message: Message) -> None:
+        """Record status and detect SSE streams from the response start message."""
+        record["status_code"] = message["status"]
+        for k, v in message.get("headers", []):
+            if k.lower() == b"content-type" and v.startswith(b"text/event-stream"):
+                record["stream"] = 1
+
+    def _record_body(self, record: dict[str, Any], error_body: bytearray,
+                     message: Message) -> None:
+        """Capture error bodies and mid-stream SSE error events."""
+        body = message.get("body", b"")
+        if record["status_code"] >= 400:
+            if len(error_body) < _MAX_ERROR_BODY:
+                error_body.extend(body[: _MAX_ERROR_BODY - len(error_body)])
+        elif record["stream"] and not record.get("error") and b'"error"' in body:
+            record["error"] = _sse_error(body)
 
     async def _intercept(self, record: dict[str, Any], error_body: bytearray,
                          message: Message, send: Send) -> None:
         """Inspect outgoing ASGI messages and record status/stream/SSE errors."""
         if message["type"] == "http.response.start":
-            record["status_code"] = message["status"]
-            for k, v in message.get("headers", []):
-                if k.lower() == b"content-type" and v.startswith(b"text/event-stream"):
-                    record["stream"] = 1
+            self._record_start(record, message)
         elif message["type"] == "http.response.body":
-            body = message.get("body", b"")
-            if record["status_code"] >= 400:
-                if len(error_body) < _MAX_ERROR_BODY:
-                    error_body.extend(body[: _MAX_ERROR_BODY - len(error_body)])
-            elif record["stream"] and not record.get("error") and b'"error"' in body:
-                record["error"] = _sse_error(body)
+            self._record_body(record, error_body, message)
         await send(message)
 
     def _init_record(self, scope: Scope, path: str) -> dict[str, Any]:

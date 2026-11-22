@@ -25,7 +25,7 @@ class Gateway:
         self.driver = driver
         self.max_failover = max_failover
 
-    @asynccontextmanager  # pyrefly: ignore[deprecated]
+    @asynccontextmanager
     async def _lease(self, exclude: list[str], hint: str | None,
                      kind: str | None = None) -> AsyncIterator[Lease]:
         if not self.driver.requires_account and not self.pool.all():

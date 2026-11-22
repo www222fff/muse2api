@@ -6,6 +6,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
@@ -14,7 +15,7 @@ from fastapi.responses import StreamingResponse
 from ...core.media import load_image_ref
 from ...core.models import resolve_model
 from ...core.prompt import flatten_messages, message_turns
-from ...core.tools import extract_tool_calls
+from ...core.tools import extract_tool_calls, sanitize_response_text
 from ...drivers.base import ChatRequest, InputImage
 from ...errors import InvalidRequest, Muse2APIError
 from ...services.container import Services
@@ -181,16 +182,34 @@ def _available_tool_names(body: ChatCompletionRequest) -> list[str]:
     ]
 
 
+def _last_user_query_from_body(body: ChatCompletionRequest) -> str:
+    for m in reversed(body.messages):
+        if m.role == "user":
+            if isinstance(m.content, str):
+                return m.content
+            if isinstance(m.content, list):
+                parts: list[str] = []
+                for p in m.content:
+                    if isinstance(p, dict) and "text" in p:
+                        parts.append(str(p["text"]))
+                return " ".join(parts)
+    return ""
+
+
 async def _non_streaming(stream, body: ChatCompletionRequest, flat, completion_id: str,
                          created: int, model_name: str) -> dict:
     """Non-streaming completion, with optional tool-call reconstruction."""
     text = "".join([d async for d in stream])
+    user_q = _last_user_query_from_body(body)
     if body.tools:
-        tool_calls, remaining = extract_tool_calls(text, _available_tool_names(body))
+        tool_calls, remaining = extract_tool_calls(
+            text, _available_tool_names(body), user_query=user_q
+        )
         if tool_calls:
             return _tool_calls_payload(completion_id, created, model_name,
-                                       remaining or "", tool_calls, flat.text)
-    return _completion_payload(completion_id, created, model_name, text, flat.text)
+                                       sanitize_response_text(remaining or ""), tool_calls, flat.text)
+    clean_text = sanitize_response_text(text)
+    return _completion_payload(completion_id, created, model_name, clean_text, flat.text)
 
 
 @router.post("/v1/chat/completions")
@@ -212,12 +231,23 @@ async def chat_completions(body: ChatCompletionRequest, request: Request,
     if not body.stream:
         return await _non_streaming(stream, body, flat, completion_id, created, model_name)
 
-    return await _streaming(stream, svc, body, flat, completion_id, created, model_name, cancel)
+    return await _streaming(
+        stream, svc, body, flat, _CompletionIds(completion_id, created, model_name), cancel
+    )
 
 
-async def _streaming(stream, svc, body: ChatCompletionRequest, flat, completion_id: str,
-                     created: int, model_name: str, cancel) -> StreamingResponse:
+@dataclass(frozen=True)
+class _CompletionIds:
+    """Identifiers shared by every completion response built in this module."""
+    completion_id: str
+    created: int
+    model_name: str
+
+
+async def _streaming(stream, svc, body: ChatCompletionRequest, flat,
+                     ids: _CompletionIds, cancel) -> StreamingResponse:
     """Build the streaming SSE response (with or without first-delta pre-fetch)."""
+    completion_id, created, model_name = ids.completion_id, ids.created, ids.model_name
     available_tool_names = _available_tool_names(body)
 
     def chunk(delta: dict, finish: str | None = None) -> dict:
@@ -227,17 +257,22 @@ async def _streaming(stream, svc, body: ChatCompletionRequest, flat, completion_
             "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
         }
 
-    async def _stream_tools() -> AsyncIterator[bytes]:
+    async def _stream_tools(first: str) -> AsyncIterator[bytes]:
         """Streamed chat with tool extraction (full output is buffered)."""
-        produced = ""
+        produced = first or ""
         async for delta in stream:
             produced += delta
-        tool_calls, remaining = extract_tool_calls(produced, available_tool_names)
+        user_q = _last_user_query_from_body(body)
+        tool_calls, remaining = extract_tool_calls(
+            produced, available_tool_names, user_query=user_q
+        )
         if tool_calls:
-            yield _tool_calls_chunk(completion_id, created, model_name, remaining or "", tool_calls)
+            clean_remaining = sanitize_response_text(remaining or "")
+            yield _tool_calls_chunk(completion_id, created, model_name, clean_remaining, tool_calls)
             yield _tool_calls_finish(completion_id, created, model_name)
         else:
-            yield _sse(chunk({"role": "assistant", "content": produced}))
+            clean_text = sanitize_response_text(produced)
+            yield _sse(chunk({"role": "assistant", "content": clean_text}))
             yield _sse(chunk({}, "stop"))
         if (body.stream_options or {}).get("include_usage"):
             yield _usage_chunk(completion_id, created, model_name, flat.text, produced)
@@ -263,7 +298,7 @@ async def _streaming(stream, svc, body: ChatCompletionRequest, flat, completion_
                 for beat in heartbeats:
                     yield beat
             if body.tools:
-                async for ev in _stream_tools():
+                async for ev in _stream_tools(first):
                     yield ev
             else:
                 async for ev in _stream_plain(first):

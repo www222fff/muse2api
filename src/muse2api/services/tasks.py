@@ -53,7 +53,7 @@ class TaskManager:
         # Runs in the task's own context, so it still sees the submitting request's state.
         self.on_finish = on_finish
         self._tasks: dict[str, Task] = {}
-        self._running: dict[str, asyncio.Task] = {}
+        self._running: dict[str, asyncio.Task[None]] = {}
 
     async def load(self) -> None:
         if not self.path.is_file():

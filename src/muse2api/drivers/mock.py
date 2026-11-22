@@ -10,6 +10,7 @@ import asyncio
 import struct
 import zlib
 from collections.abc import AsyncIterator
+from typing import Any
 
 from ..accounts.model import Account
 from .base import (
@@ -61,7 +62,7 @@ class MockDriver(MuseDriver):
             yield reply[i : i + 8]
 
     async def generate_image(self, account: Account, req: ImageRequest) -> list[MediaResult]:
-        results = []
+        results: list[MediaResult] = []
         for i in range(max(1, req.n)):
             if req.on_progress:
                 req.on_progress(int((i + 1) / max(1, req.n) * 100))
@@ -90,7 +91,7 @@ class MockDriver(MuseDriver):
     async def renew_session(self, account: Account) -> SessionInfo:
         return SessionInfo(ok=True, meta={"driver": "mock"})
 
-    async def quota(self, account: Account) -> dict:
+    async def quota(self, account: Account) -> dict[str, Any]:
         """Deterministic fake quota snapshot for plumbing tests and front-end work."""
         return {
             "plan": "free",

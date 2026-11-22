@@ -31,11 +31,11 @@ class InputImage:
 class ChatRequest:
     prompt: str
     model: str
-    images: list[InputImage] = field(default_factory=list)
+    images: list[InputImage] = field(default_factory=list[InputImage])
     timeout: float = 300.0
     first_token_timeout: float = 75.0
     conversation_hint: str | None = None
-    turns: list[tuple[str, str]] = field(default_factory=list)
+    turns: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
     """Role/text pairs of the request, used to continue a hot page instead of resending history."""
     cancel: asyncio.Event | None = None
 
@@ -47,7 +47,7 @@ class ImageRequest:
     size: str | None = None
     """Aspect ratio such as ``1:1`` / ``16:9`` or an OpenAI size like ``1024x1024``."""
     n: int = 1
-    reference_images: list[InputImage] = field(default_factory=list)
+    reference_images: list[InputImage] = field(default_factory=list[InputImage])
     timeout: float = 240.0
     on_progress: ProgressCallback | None = None
     cancel: asyncio.Event | None = None
@@ -78,9 +78,9 @@ class MediaResult:
 @dataclass
 class SessionInfo:
     ok: bool
-    cookies: dict[str, str] = field(default_factory=dict)
-    cookie_expires: dict[str, int] = field(default_factory=dict)
-    meta: dict[str, Any] = field(default_factory=dict)
+    cookies: dict[str, str] = field(default_factory=dict[str, str])
+    cookie_expires: dict[str, int] = field(default_factory=dict[str, int])
+    meta: dict[str, Any] = field(default_factory=dict[str, Any])
 
 
 @dataclass(frozen=True)

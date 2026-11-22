@@ -103,6 +103,29 @@ async def generate_images(body: ImageGenerationRequest, request: Request,
     return await _generate(body, loaded, request, svc)
 
 
+def _parse_edit_form(form) -> tuple[list[UploadFile], dict[str, str]]:
+    """Split an edit multipart form into image files and string fields."""
+    if form.get("mask") is not None:
+        raise InvalidRequest("mask is not supported; muse.ai cannot inpaint a region")
+    files = [f for key in ("image", "image[]") for f in form.getlist(key)
+             if isinstance(f, UploadFile)]
+    if not files:
+        raise InvalidRequest("at least one image file is required (field 'image' or 'image[]')")
+    fields = {k: v for k, v in form.items() if isinstance(v, str) and k not in ("image", "image[]")}
+    return files, fields
+
+
+async def _reference_images(files: list[UploadFile]) -> list[InputImage]:
+    """Read uploaded files into InputImage references, guessing mime when missing."""
+    refs = []
+    for f in files:
+        mime = f.content_type or ""
+        if not mime.startswith("image/"):
+            mime = mimetypes.guess_type(f.filename or "")[0] or "image/png"
+        refs.append(InputImage(data=await f.read(), mime=mime))
+    return refs
+
+
 @router.post("/v1/images/edits")
 async def edit_images(request: Request, svc: Annotated[Services, Depends(get_services)]) -> dict:
     """OpenAI-style multipart edit: ``image`` / ``image[]`` files plus a prompt.
@@ -111,23 +134,12 @@ async def edit_images(request: Request, svc: Annotated[Services, Depends(get_ser
     and ``mask`` is rejected rather than silently ignored.
     """
     form = await request.form()
-    if form.get("mask") is not None:
-        raise InvalidRequest("mask is not supported; muse.ai cannot inpaint a region")
-    files = [f for key in ("image", "image[]") for f in form.getlist(key)
-             if isinstance(f, UploadFile)]
-    if not files:
-        raise InvalidRequest("at least one image file is required (field 'image' or 'image[]')")
-    fields = {k: v for k, v in form.items() if isinstance(v, str) and k not in ("image", "image[]")}
+    files, fields = _parse_edit_form(form)
     try:
         body = ImageGenerationRequest(**cast(Any, fields))
     except ValidationError as exc:
         raise InvalidRequest(exc.errors()[0].get("msg", "invalid request")) from exc
-    refs = []
-    for f in files:
-        mime = f.content_type or ""
-        if not mime.startswith("image/"):
-            mime = mimetypes.guess_type(f.filename or "")[0] or "image/png"
-        refs.append(InputImage(data=await f.read(), mime=mime))
+    refs = await _reference_images(files)
     return await _generate(body, refs, request, svc)
 
 

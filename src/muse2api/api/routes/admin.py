@@ -12,8 +12,9 @@ import zipfile
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends
 from fastapi.responses import Response
+from pydantic import BaseModel, Field
 
 from ... import __version__
 from ...accounts.keepalive import renew_account
@@ -21,6 +22,7 @@ from ...accounts.model import Account, AccountStatus
 from ...auth.keys import ApiKey
 from ...errors import InvalidRequest, Muse2APIError, NotFound
 from ...services.container import Services
+from ...services.request_log import RequestQuery
 from ...upstream.muse import missing_session_cookies
 from ..deps import get_services, require_admin_key
 from ..schemas import AccountCreate, AccountsImportRequest, AccountUpdate, KeyCreate, KeyUpdate
@@ -289,21 +291,28 @@ async def delete_key(key_id: str, svc: Annotated[Services, Depends(get_services)
 
 
 # ---- request log ----
+class RequestFilter(BaseModel):
+    """Query filter bundle for ``GET /admin/requests`` (one query param per field)."""
+    key_id: str | None = None
+    account_id: str | None = None
+    status: Literal["2xx", "3xx", "4xx", "5xx", "failed"] | None = None
+    path: str | None = None
+    since: float | None = Field(default=None, description="Unix seconds")
+    hide_polls: bool = False
+    limit: int = Field(default=100, ge=1, le=500)
+    offset: int = Field(default=0, ge=0)
+
+
 @router.get("/requests")
 async def list_requests(
     svc: Annotated[Services, Depends(get_services)],
-    key_id: str | None = None,
-    account_id: str | None = None,
-    status: Literal["2xx", "3xx", "4xx", "5xx", "failed"] | None = None,
-    path: str | None = None,
-    since: float | None = Query(default=None, description="Unix seconds"),
-    hide_polls: bool = False,
-    limit: int = Query(default=100, ge=1, le=500),
-    offset: int = Query(default=0, ge=0),
+    filters: Annotated[RequestFilter, Depends()],
 ) -> dict:
-    return await svc.requests.query(key_id=key_id, account_id=account_id, status=status,
-                                    path=path, since=since, hide_polls=hide_polls,
-                                    limit=limit, offset=offset)
+    return await svc.requests.query(RequestQuery(
+        key_id=filters.key_id, account_id=filters.account_id, status=filters.status,
+        path=filters.path, since=filters.since, hide_polls=filters.hide_polls,
+        limit=filters.limit, offset=filters.offset,
+    ))
 
 
 @router.get("/stats")

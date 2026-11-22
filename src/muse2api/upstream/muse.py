@@ -12,7 +12,7 @@ import os
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, NamedTuple, cast
 
 import httpx
 
@@ -67,14 +67,25 @@ def _merge_cookies(resp: httpx.Response, jar: dict[str, str], expires: dict[str,
             expires[c.name] = c.expires
 
 
-def _json_body(resp: httpx.Response) -> dict:
+def _json_body(resp: httpx.Response) -> dict[str, Any]:
     if not resp.headers.get("content-type", "").startswith("application/json"):
         return {}
     try:
         body = resp.json()
     except ValueError:
         return {}
-    return body if isinstance(body, dict) else {}
+    if isinstance(body, dict):
+        return cast(dict[str, Any], body)
+    return {}
+
+
+class WakeTiming(NamedTuple):
+    """Poll timing knobs for VM wake confirmation (injectable for tests)."""
+    timeout: float
+    confirm_s: float
+    poll_s: float = WAKE_POLL_SECONDS
+    sleep: Callable[[float], Awaitable[object]] = asyncio.sleep
+    clock: Callable[[], float] = time.monotonic
 
 
 async def renew_session(
@@ -122,52 +133,66 @@ async def renew_session(
         }
 
         if wake_vm and meta["vm_id"] and meta["vm_state"] != "DISABLED":
-            try:
-                w = await client.post(
-                    VM_WAKE_API,
-                    headers={"Cookie": cookie_header(jar)},
-                    json={"vm_id": meta["vm_id"], "retry_count": 0,
-                          "connect_attempt_id": str(uuid.uuid4())},
-                )
-                meta["vm_wake_http"] = str(w.status_code)
-            except httpx.HTTPError as exc:
-                meta["vm_wake_http"] = type(exc).__name__
-            # The wake's own answer says little: muse.ai answers 403 to a wake for a
-            # VM that is already RUNNING. Judge by the state the session reports.
-            meta["vm_state_after"] = await _confirm_running(
-                client, jar, expires, timeout=timeout,
+            timing = WakeTiming(
+                timeout=timeout,
                 confirm_s=wake_confirm_seconds() if confirm_s is None else confirm_s,
-                poll_s=poll_s, sleep=sleep, clock=clock)
-            # None when no poll answered: unknown is not evidence the VM is down.
-            meta["vm_wake_ok"] = (None if meta["vm_state_after"] is None
-                                  else meta["vm_state_after"] == "RUNNING")
+                poll_s=poll_s,
+                sleep=sleep,
+                clock=clock,
+            )
+            meta.update(await _wake_vm(client, jar, expires, meta["vm_id"], timing))
 
     return SessionInfo(ok=meta["session_status"] == "assigned", cookies=jar,
                        cookie_expires=expires, meta=meta)
 
 
+async def _wake_vm(
+    client: httpx.AsyncClient, jar: dict[str, str], expires: dict[str, int],
+    vm_id: str, timing: WakeTiming,
+) -> dict[str, Any]:
+    """POST a wake request, then poll the session endpoint for RUNNING."""
+    meta: dict[str, Any] = {}
+    # The wake's own answer says little: muse.ai answers 403 to a wake for a
+    # VM that is already RUNNING. Judge by the state the session reports.
+    try:
+        w = await client.post(
+            VM_WAKE_API,
+            headers={"Cookie": cookie_header(jar)},
+            json={"vm_id": vm_id, "retry_count": 0,
+                  "connect_attempt_id": str(uuid.uuid4())},
+        )
+        meta["vm_wake_http"] = str(w.status_code)
+    except httpx.HTTPError as exc:
+        meta["vm_wake_http"] = type(exc).__name__
+    meta["vm_state_after"] = await _confirm_running(client, jar, expires, timing)
+    # None when no poll answered: unknown is not evidence the VM is down.
+    meta["vm_wake_ok"] = (None if meta["vm_state_after"] is None
+                          else meta["vm_state_after"] == "RUNNING")
+    return meta
+
+
 async def _confirm_running(
-    client: httpx.AsyncClient, jar: dict[str, str], expires: dict[str, int], *,
-    timeout: float, confirm_s: float, poll_s: float,
-    sleep: Callable[[float], Awaitable[object]], clock: Callable[[], float],
+    client: httpx.AsyncClient, jar: dict[str, str], expires: dict[str, int],
+    timing: WakeTiming,
 ) -> str | None:
     """Poll the session endpoint until the VM is ``RUNNING`` or ``confirm_s`` passes.
     Returns the last ``vm_state`` seen. Errors only cost that poll."""
-    deadline = clock() + confirm_s
+    deadline = timing.clock() + timing.confirm_s
     state: str | None = None
     while True:
-        remaining = deadline - clock()
+        remaining = deadline - timing.clock()
         try:
             resp = await client.get(SESSION_API, headers={"Cookie": cookie_header(jar)},
-                                    timeout=max(1.0, min(timeout, remaining)))
+                                    timeout=max(1.0, min(timing.timeout, remaining)))
         except httpx.HTTPError:
             resp = None
         if resp is not None and resp.status_code < 400:
             _merge_cookies(resp, jar, expires)
-            if (seen := _json_body(resp).get("vm_state")) is not None:
+            seen = _json_body(resp).get("vm_state")
+            if seen is not None:
                 state = str(seen)[:128]
                 if state == "RUNNING":
                     return state
-        if clock() + poll_s > deadline:
+        if timing.clock() + timing.poll_s > deadline:
             return state
-        await sleep(poll_s)
+        await timing.sleep(timing.poll_s)
