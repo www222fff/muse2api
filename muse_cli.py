@@ -63,6 +63,7 @@ except ImportError:
     pass
 
 SESSION_USER_ID = os.environ.get("MUSE_SESSION_ID") or f"muse_cli_{os.getpid()}"
+STATUS_CMD = "/status"
 
 
 def _create_prompt_session() -> Any:
@@ -585,7 +586,6 @@ def _handle_model_switch(prompt: str) -> str:
 
 def _handle_help() -> None:
     """Display styled command help."""
-    STATUS_CMD = "/status"
     commands = [
         ("/git <command>", "Run git operations directly (e.g. /git status, /git diff)"),
         ("/open <path>", "Open and attach local file or folder to conversation context"),
@@ -743,7 +743,7 @@ def _handle_cd_cmd(prompt_lower, prompt, model, history, last_reply):
 
 def _handle_status_cmd(prompt_lower, prompt, model, history, last_reply):
     """Handle /status, status commands."""
-    if prompt_lower in ("/status", "status"):
+    if prompt_lower in (STATUS_CMD, "status"):
         show_status()
         return "continue", history, last_reply, model
     return None
@@ -1058,7 +1058,7 @@ def main():
         display_models(current_model=selected_model)
     elif first == "chat":
         interactive_chat(model=selected_model)
-    elif first in ("status", "/status"):
+    elif first in ("status", STATUS_CMD):
         show_status()
     else:
         prompt = " ".join(filtered_argv)

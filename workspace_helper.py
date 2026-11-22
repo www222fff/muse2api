@@ -39,14 +39,19 @@ EXT_MD: str = ".md"
 EXT_SH: str = ".sh"
 
 
-def get_default_workspace() -> Path:
-    """Return default workspace directory."""
+def get_default_workspace(prompt: str = "") -> Path:
+    """Return default workspace directory, resolving muse2api vs trading repo from prompt."""
     env_root = os.environ.get("MUSE_WORKSPACE_ROOT")
     if env_root and os.path.exists(env_root):
         return Path(env_root)
-    cwd = Path(os.getcwd())
+    if prompt and "muse2api" in prompt.lower():
+        muse_dir = Path("/Users/Gaurav_Batra/muse2api")
+        if muse_dir.exists():
+            return muse_dir
     trading_dir = Path("/Volumes/Drive D/Indian Firm/Ai-indian-trading-firm")
-    return trading_dir if trading_dir.exists() else cwd
+    if trading_dir.exists():
+        return trading_dir
+    return Path(os.getcwd())
 
 
 def _get_file_index(base: Path) -> dict[str, Path]:
@@ -400,10 +405,14 @@ def build_context_for_paths(
     max_chars: int = 35000,
 ) -> str:
     """Build a structured context block from local files or directories."""
-    base = get_default_workspace()
+    base = get_default_workspace(prompt)
     blocks = [
-        "[Autonomous Agent Mode Active — Direct Workspace File Edit Access]",
-        f"Connected Workspace Root: {base}",
+        "[Autonomous Agent Mode Active — Direct Multi-Drive Host Access]",
+        "Host: macOS",
+        "Accessible Workspaces:",
+        "- Main Drive: /Users/Gaurav_Batra/muse2api",
+        "- D Drive: /Volumes/Drive D/Indian Firm/Ai-indian-trading-firm",
+        f"Active Target Root: {base}",
         "You have direct write and edit access to the local codebase through the terminal bridge.",
         "When asked to fix bugs, refactor, implement features, or edit files:",
         "1. Always specify the relative target file path in your code block header or before it:",

@@ -14,9 +14,10 @@ import itertools
 import logging
 import time
 from collections import defaultdict
-from collections.abc import AsyncIterator, Iterable
-from contextlib import asynccontextmanager
-from typing import Any, Protocol, cast
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable
+from contextlib import AbstractAsyncContextManager
+from functools import wraps
+from typing import Any, Protocol, TypeVar, cast
 
 from ..errors import NoAccountAvailable, UpstreamAuthError, UpstreamQuotaError, UpstreamTimeout
 from .model import Account, AccountStatus
@@ -28,7 +29,6 @@ WAKE_BLOCK_KIND = "video"
 WAKE_BLOCK_SECONDS = 600
 """How long an account whose VM wake was not confirmed is skipped for video: a video
 on a VM that is not RUNNING stalls for minutes."""
-
 
 def _kind_blocked_until(acc: Account, kind: str) -> float:
     blocked = acc.meta.get("kind_blocked_until")
@@ -125,6 +125,52 @@ class Lease:
 
 
 # ---------------------------------------------------------------- pool
+_T = TypeVar("_T")
+
+
+class _AsyncContextManager(AbstractAsyncContextManager[_T]):
+    """Compact async-context-manager decorator (stdlib-compatible semantics)."""
+
+    def __init__(self, func: Callable[..., AsyncIterator[_T]], args: tuple[Any, ...],
+                 kwargs: dict[str, Any]) -> None:
+        self._func = func
+        self._args = args
+        self._kwargs = kwargs
+        self._agen: AsyncGenerator[_T, Any] | None = None
+
+    async def __aenter__(self) -> _T:
+        agen = self._func(*self._args, **self._kwargs)
+        self._agen = cast(AsyncGenerator[_T, Any], agen)
+        return await self._agen.__anext__()
+
+    async def __aexit__(self, typ: type[BaseException] | None,
+                        value: BaseException | None, traceback: Any) -> bool:
+        if self._agen is None:
+            return False
+        try:
+            if typ is not None:
+                await self._agen.athrow(cast(BaseException, value))
+            else:
+                await self._agen.__anext__()
+        except StopAsyncIteration:
+            return False
+        except BaseException as exc:
+            if typ is not None and issubclass(typ, type(exc)):
+                return False
+            raise
+        return False
+
+
+def _asynccontextmanager(
+    func: Callable[..., AsyncIterator[_T]],
+) -> Callable[..., _AsyncContextManager[_T]]:
+    @wraps(func)
+    def helper(*args: Any, **kwargs: Any) -> _AsyncContextManager[_T]:
+        return _AsyncContextManager(func, args, kwargs)
+
+    return helper
+
+
 class AccountPool:
     def __init__(
         self,
@@ -294,7 +340,7 @@ class AccountPool:
             acc.status = AccountStatus.COOLING
             acc.cooldown_until = time.time() + self.cooldown
 
-    @asynccontextmanager
+    @_asynccontextmanager
     async def lease(
         self, *, exclude: Iterable[str] = (), hint: str | None = None, kind: str | None = None
     ) -> AsyncIterator[Lease]:

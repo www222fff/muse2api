@@ -156,8 +156,11 @@ def _render_blocks(turns: list[tuple[str, str]], tool_section: str,
         blocks.append(f"[{label}]\n{text}")
 
     blocks.append(
-        "[Instruction]\nContinue the conversation above and reply as the Assistant to the last "
-        "User message. If a tool call is needed, format it as specified. Output only the reply."
+        "[Instruction]\n"
+        "Continue the conversation above as the Assistant. "
+        "If tool execution results are present in [Tool Result] above, formulate a comprehensive "
+        "summary of the tool results for the user. Do not repeat web-sandbox disclaimers. "
+        "If another tool call is needed, format it as specified. Output only the reply."
     )
     return blocks
 

@@ -43,6 +43,7 @@ from ..base import (
     InputImage,
     MediaResult,
     MuseDriver,
+    ProgressCallback,
     SessionInfo,
     VideoRequest,
 )
@@ -91,7 +92,7 @@ class _Tab:
     target_id: str
     session: CDPSession
     hint: str | None = None
-    turns: list[tuple[str, str]] = field(default_factory=list)
+    turns: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
     image_count: int = 0
     thread_url: str = ""
     quota_note: str = ""
@@ -129,7 +130,7 @@ class BrowserDriver(MuseDriver):
         # Last quota snapshot per account (see ``quota``) and the lock serialising reads.
         self._quota_cache: dict[str, dict[str, Any]] = {}
         self._quota_locks: dict[str, asyncio.Lock] = {}
-        self._warming: dict[str, asyncio.Task] = {}
+        self._warming: dict[str, asyncio.Task[None]] = {}
 
     # ------------------------------------------------------------ lifecycle
     async def startup(self) -> None:
@@ -355,16 +356,27 @@ class BrowserDriver(MuseDriver):
         tab.thread_url = ""
 
     @staticmethod
-    def _restore_turns(hot: dict) -> list[tuple[str, str]]:
+    def _turn_pair_text(pair: Any) -> tuple[str, str] | None:
+        """Render a (role, text) pair as strings when it really is a 2-item sequence."""
+        try:
+            first, second = pair
+        except (TypeError, ValueError):
+            return None
+        return str(first), str(second)
+
+    @staticmethod
+    def _restore_turns(hot: dict[str, Any]) -> list[tuple[str, str]]:
         """Rebuild the saved turn list from a hot-page record."""
         turns: list[tuple[str, str]] = []
-        for item in hot.get("turns") or []:
-            if isinstance(item, (list, tuple)) and len(item) == 2:
-                turns.append((str(item[0]), str(item[1])))
+        for item in cast(list[Any], hot.get("turns") or []):
+            if isinstance(item, (list, tuple)):
+                converted = BrowserDriver._turn_pair_text(item)
+                if converted is not None:
+                    turns.append(converted)
         return turns
 
     @staticmethod
-    def _parse_image_count(hot: dict) -> int:
+    def _parse_image_count(hot: dict[str, Any]) -> int:
         try:
             return int(hot.get("image_count") or 0)
         except (TypeError, ValueError):
@@ -377,10 +389,11 @@ class BrowserDriver(MuseDriver):
         hot = account.meta.get("hot_page")
         if not isinstance(hot, dict):
             return
-        tab.turns = self._restore_turns(hot)
-        tab.hint = hot.get("hint") or None
-        tab.thread_url = str(hot.get("url") or "")
-        tab.image_count = self._parse_image_count(hot)
+        hot_dict = cast(dict[str, Any], hot)
+        tab.turns = self._restore_turns(hot_dict)
+        tab.hint = hot_dict.get("hint") or None
+        tab.thread_url = str(hot_dict.get("url") or "")
+        tab.image_count = self._parse_image_count(hot_dict)
 
     def _save_hot(self, tab: _Tab, account: Account, req: ChatRequest, url: str) -> None:
         if url:
@@ -409,7 +422,7 @@ class BrowserDriver(MuseDriver):
             return False
         return True
 
-    def _chat_blocked(self, state: dict) -> bool:
+    def _chat_blocked(self, state: dict[str, Any]) -> bool:
         """True when the page cannot take another message right now."""
         if state.get("generating"):
             return True
@@ -423,7 +436,7 @@ class BrowserDriver(MuseDriver):
         if not self._same_thread(href, tab):
             return False
         try:
-            page = await tab.session.evaluate(dom.PAGE_STATE) or {}
+            page: dict[str, Any] = await tab.session.evaluate(dom.PAGE_STATE) or {}
             state = await self._state(tab)
         except CDPError:
             return False
@@ -452,7 +465,7 @@ class BrowserDriver(MuseDriver):
             return
         await tab.session.send("Page.navigate", {"url": muse.NEW_THREAD_URL})
         deadline = time.monotonic() + self.settings.page_ready_timeout
-        state: dict = {}
+        state: dict[str, Any] = {}
         while time.monotonic() < deadline:
             await asyncio.sleep(0.25)
             # A busy page can leave Runtime.evaluate unanswered while it loads; poll again.
@@ -469,7 +482,7 @@ class BrowserDriver(MuseDriver):
     async def _attach(self, tab: _Tab, images: list[InputImage]) -> None:
         for idx, img in enumerate(images):
             ext = img.mime.split("/")[-1].replace("jpeg", "jpg")
-            res = await tab.session.evaluate(
+            res: dict[str, Any] | None = await tab.session.evaluate(
                 dom.attach_file(base64.b64encode(img.data).decode(), img.mime, f"input_{idx}.{ext}")
             )
             if not (res or {}).get("ok"):
@@ -478,7 +491,7 @@ class BrowserDriver(MuseDriver):
             await asyncio.sleep(1.0)
 
     async def _send(self, tab: _Tab, prompt: str) -> None:
-        res = await tab.session.evaluate(dom.fill_input(prompt))
+        res: dict[str, Any] | None = await tab.session.evaluate(dom.fill_input(prompt))
         if not (res or {}).get("ok"):
             raise UpstreamError(f"cannot fill chat input: {(res or {}).get('err')}")
         deadline = time.monotonic() + 5
@@ -496,8 +509,8 @@ class BrowserDriver(MuseDriver):
         if not await tab.session.evaluate(dom.INPUT_EMPTY):
             raise UpstreamError("send button not found and Enter did not submit")
 
-    async def _state(self, tab: _Tab) -> dict:
-        state = await tab.session.evaluate(dom.CHAT_STATE) or {}
+    async def _state(self, tab: _Tab) -> dict[str, Any]:
+        state: dict[str, Any] = await tab.session.evaluate(dom.CHAT_STATE) or {}
         tail = state.get("tail", "")
         low = tail.lower()
         if hit := next((h for h in dom.QUOTA_HINTS if h in low), None):
@@ -517,7 +530,7 @@ class BrowserDriver(MuseDriver):
                          tab.thread_url or "new thread", snippet)
         return state
 
-    async def _prepare(self, tab: _Tab, prompt: str, images: list[InputImage]) -> dict:
+    async def _prepare(self, tab: _Tab, prompt: str, images: list[InputImage]) -> dict[str, Any]:
         await self._new_thread(tab)
         base = await self._state(tab)
         await self._attach(tab, images)
@@ -525,9 +538,9 @@ class BrowserDriver(MuseDriver):
         return base
 
     async def _deny_approvals(self, tab: _Tab) -> None:
-        denied = await tab.session.evaluate(dom.DENY_APPROVALS) or []
+        denied: list[Any] = await tab.session.evaluate(dom.DENY_APPROVALS) or []
         for what in denied:
-            log.info("denied muse.ai %s", what.lower())
+            log.info("denied muse.ai %s", str(what).lower())
 
     # ------------------------------------------------------------ chat
     async def _live_continuation(self, tab: _Tab) -> bool:
@@ -536,7 +549,7 @@ class BrowserDriver(MuseDriver):
         if not last_user:
             return False
         try:
-            page = await tab.session.evaluate(dom.PAGE_STATE) or {}
+            page: dict[str, Any] = await tab.session.evaluate(dom.PAGE_STATE) or {}
             if not page.get("hasInput"):
                 return False
             state = await self._state(tab)
@@ -577,7 +590,7 @@ class BrowserDriver(MuseDriver):
     async def _open_fresh_thread(self, tab: _Tab, account: Account, hint: str) -> None:
         """Drop any stale hot-page hint and start a new thread on ``tab``."""
         saved = account.meta.get("hot_page")
-        if isinstance(saved, dict) and (saved.get("hint") or "") == hint:
+        if isinstance(saved, dict) and (cast(dict[str, Any], saved).get("hint") or "") == hint:
             account.meta.pop("hot_page", None)
         if tab.warm:
             log.info("using a warm thread")
@@ -655,13 +668,13 @@ class BrowserDriver(MuseDriver):
             raise UpstreamTimeout("no first token from assistant")
 
     @staticmethod
-    def _raise_if_stalled(elapsed: float, st: dict) -> None:
+    def _raise_if_stalled(elapsed: float, st: dict[str, Any]) -> None:
         """Raise when the upstream workspace is stuck connecting."""
         if elapsed > STALL_GIVE_UP and any(h in st.get("tail", "") for h in dom.STALL_HINTS):
             raise UpstreamTimeout("upstream workspace is stuck connecting")
 
     @staticmethod
-    def _stream_settled(st: dict, stable: int) -> bool:
+    def _stream_settled(st: dict[str, Any], stable: int) -> bool:
         """True when the reply has been stable long enough to finalise."""
         return (not st.get("generating") and stable >= STABLE_POLLS_DONE) or stable >= STABLE_POLLS_FORCE
 
@@ -865,7 +878,7 @@ class BrowserDriver(MuseDriver):
     # ------------------------------------------------------------ media
     @staticmethod
     def _media_prompt(prompt: str, kind: str, size: str | None, duration: int | None = None) -> str:
-        hints = []
+        hints: list[str] = []
         if size:
             hints.append(f"aspect ratio {size}")
         if duration:
@@ -899,17 +912,18 @@ class BrowserDriver(MuseDriver):
                                   "the chat" + (" instead of uploading it." if denied
                                                 else ", as a single attachment."))
             return "ask", None
-        probe = await tab.session.evaluate(dom.LAST_BUBBLE_MEDIA) or {}
-        url = self._pick_media_url(probe.get("links", []), kind)
+        probe: dict[str, Any] = await tab.session.evaluate(dom.LAST_BUBBLE_MEDIA) or {}
+        links = [str(link) for link in cast(list[Any], probe.get("links", [])) if link]
+        url = self._pick_media_url(links, kind)
         if url:
             log.info("%s delivered as link in text bubble: %s", kind, url)
             return "link", url
         log.info("%s: no media after %.0fs grace; links=%s html=%.300s",
-                 kind, grace, probe.get("links", []), probe.get("html", ""))
+                 kind, grace, links, probe.get("html", ""))
         return "refuse", text
 
-    async def _settle_text_only(self, tab: _Tab, st: dict, kind: str,
-                                ctx: dict) -> tuple[str, dict | None]:
+    async def _settle_text_only(self, tab: _Tab, st: dict[str, Any], kind: str,
+                                ctx: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
         """Wait out text-only replies; ask once, then probe links or refuse."""
         text = st.get("lastText", "")
         if not (st.get("agentCount", 0) > ctx["base_count"] and text
@@ -932,20 +946,26 @@ class BrowserDriver(MuseDriver):
         raise UpstreamRefused(f"upstream replied with text only: {text[:200]}")
 
     @staticmethod
-    def _fresh_attachment(new_atts: list[dict], kind: str) -> dict | None:
+    def _fresh_attachment(new_atts: list[Any], kind: str) -> dict[str, Any] | None:
         """First ready attachment of ``kind``, or None."""
         for a in new_atts:
-            if a.get("src") and a.get("kind") == kind:
-                return a
+            if not isinstance(a, dict):
+                continue
+            d = cast(dict[str, Any], a)
+            if d.get("src") and d.get("kind") == kind:
+                return d
         return None
 
     @staticmethod
-    def _has_pending_attachment(new_atts: list[dict], kind: str) -> bool:
+    def _has_pending_attachment(new_atts: list[Any], kind: str) -> bool:
         """An attachment node for ``kind`` is present but its blob src is not ready."""
-        return any(kind in (a.get("tid") or "") for a in new_atts)
+        for a in new_atts:
+            if isinstance(a, dict) and kind in (cast(dict[str, Any], a).get("tid") or ""):
+                return True
+        return False
 
-    async def _step_media(self, tab: _Tab, st: dict, kind: str,
-                          ctx: dict) -> tuple[str, dict | None]:
+    async def _step_media(self, tab: _Tab, st: dict[str, Any], kind: str,
+                          ctx: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
         """Advance one media-wait iteration; returns (action, payload)."""
         new_atts = st.get("attachments", [])[ctx["base_atts"]:]
         fresh = self._fresh_attachment(new_atts, kind)
@@ -959,13 +979,14 @@ class BrowserDriver(MuseDriver):
             return "continue", None
         return await self._settle_text_only(tab, st, kind, ctx)
 
-    def _wait_expired(self, elapsed: float, timeout: float, ctx: dict) -> bool:
+    def _wait_expired(self, elapsed: float, timeout: float, ctx: dict[str, Any]) -> bool:
         """The wait has run out and media is not visibly still finishing."""
         return elapsed >= timeout and not (ctx["busy"] and elapsed < timeout * self._OVERRUN_FACTOR)
 
-    async def _wait_media(self, tab: _Tab, base: dict, kind: str, timeout: float,
-                          on_progress, cancel: asyncio.Event | None) -> dict:
-        ctx = {
+    async def _wait_media(self, tab: _Tab, base: dict[str, Any], kind: str, timeout: float,
+                          on_progress: ProgressCallback | None,
+                          cancel: asyncio.Event | None) -> dict[str, Any]:
+        ctx: dict[str, Any] = {
             "base_atts": len(base.get("attachments", [])),
             "base_count": base.get("agentCount", 0),
             "grace": self._MEDIA_GRACE.get(kind, 8.0),
@@ -1023,9 +1044,9 @@ class BrowserDriver(MuseDriver):
         cands.sort(key=score, reverse=True)
         return cands[0] if cands and score(cands[0]) > 0 else None
 
-    async def _download(self, tab: _Tab, att: dict, kind: str) -> MediaResult:
-        res = await tab.session.evaluate(dom.fetch_as_base64(att["src"]), await_promise=True,
-                                         timeout=300)
+    async def _download(self, tab: _Tab, att: dict[str, Any], kind: str) -> MediaResult:
+        res: dict[str, Any] = await tab.session.evaluate(dom.fetch_as_base64(att["src"]),
+                                                         await_promise=True, timeout=300)
         if not (res or {}).get("ok"):
             raise UpstreamError(f"failed to download generated {kind}: {(res or {}).get('err')}")
         mime = res.get("mime") or ("video/mp4" if kind == "video" else "image/png")
@@ -1034,7 +1055,9 @@ class BrowserDriver(MuseDriver):
                            width=att.get("w") or None, height=att.get("h") or None)
 
     async def _generate(self, account: Account, prompt: str, images: list[InputImage],
-                        kind: str, timeout: float, on_progress, cancel) -> MediaResult:
+                        kind: str, timeout: float,
+                        on_progress: ProgressCallback | None,
+                        cancel: asyncio.Event | None) -> MediaResult:
         # Media always starts a fresh thread, so keep tabs holding a chat (or a warm
         # thread) for chats.
         tab = await self._checkout(account, prefer=lambda t: not t.has_state and not t.warm)
@@ -1050,7 +1073,7 @@ class BrowserDriver(MuseDriver):
 
     async def generate_image(self, account: Account, req: ImageRequest) -> list[MediaResult]:
         prompt = self._media_prompt(req.prompt, "image", req.size)
-        results = []
+        results: list[MediaResult] = []
         for _ in range(max(1, req.n)):
             r = await self._generate(account, prompt, req.reference_images, "image",
                                      req.timeout, req.on_progress, req.cancel)
@@ -1183,7 +1206,7 @@ class BrowserDriver(MuseDriver):
                     "windowsVirtualKeyCode": 27, "nativeVirtualKeyCode": 27})
             await asyncio.sleep(self._ESCAPE_PAUSE)
 
-    async def _poll_quota_dialog(self, tab: _Tab) -> dict:
+    async def _poll_quota_dialog(self, tab: _Tab) -> dict[str, Any]:
         """Poll the open settings dialog until it shows a usage percentage or times out."""
         deadline = time.monotonic() + self._QUOTA_READ_TIMEOUT
         while True:
@@ -1205,7 +1228,7 @@ class BrowserDriver(MuseDriver):
                         tab.account_id)
 
     async def _read_quota(self, tab: _Tab) -> dict[str, Any]:
-        page = await tab.session.evaluate(dom.PAGE_STATE) or {}
+        page: dict[str, Any] = await tab.session.evaluate(dom.PAGE_STATE) or {}
         if not page.get("hasInput"):  # a fresh tab is still on about:blank
             await self._new_thread(tab)
         await self._escape(tab)  # a menu left open would swallow the first click

@@ -41,11 +41,9 @@ class Matting:
 
         src: Any = Image.open(io.BytesIO(data)).convert("RGB")
         with self._lock:
-            session = self._session
-            if session is None:
-                session = new_session(self.model)
-                self._session = session
-            cut = cast(Any, remove(src, session=session))
+            new_sess = cast(Any, new_session(self.model)) if self._session is None else self._session
+            self._session = new_sess
+            cut = cast(Any, remove(src, session=new_sess))
 
         alpha = np.asarray(cut.getchannel("A"), dtype=np.float64) / 255.0
         rgb = np.asarray(src, dtype=np.float64) / 255.0

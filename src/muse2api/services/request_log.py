@@ -16,10 +16,13 @@ import math
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar, cast
+
+_T = TypeVar("_T")
 
 log = logging.getLogger(__name__)
 
@@ -103,7 +106,7 @@ class RequestLog:
         # One connection shared by worker threads; sqlite3 objects are not thread-safe.
         self._lock = threading.Lock()
         # Outcomes of tasks that finished before their submit row was written.
-        self._early: dict[str, tuple] = {}
+        self._early: dict[str, tuple[Any, ...]] = {}
 
     def _db(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -120,7 +123,7 @@ class RequestLog:
             self._conn = conn
         return self._conn
 
-    def _call(self, fn, *args):
+    def _call(self, fn: Callable[[sqlite3.Connection], _T], *args: Any) -> _T:
         with self._lock:
             return fn(self._db(), *args)
 
@@ -179,8 +182,17 @@ class RequestLog:
 
     async def backfill_tasks(self, tasks: list[Any]) -> None:
         """Fill in outcomes for submit rows logged before outcomes were recorded."""
-        rows = [(t.status.value, t.updated_at, (t.error or {}).get("message"), None, t.id)
-                for t in tasks if t.finished]
+        rows: list[tuple[str, float, str | None, None, str]] = []
+        for t in tasks:
+            if not t.finished:
+                continue
+            err: dict[str, Any]
+            t_error = getattr(t, "error", None)
+            if isinstance(t_error, dict):
+                err = cast(dict[str, Any], t_error)
+            else:
+                err = {}
+            rows.append((t.status.value, t.updated_at, err.get("message"), None, t.id))
         if not rows:
             return
         sql = _FINISH_SQL + " AND task_status IS NULL"
@@ -203,7 +215,8 @@ class RequestLog:
 
     # ---- reads ----
     async def query(self, f: RequestQuery = RequestQuery()) -> dict[str, Any]:
-        where, args = ["1=1"], []
+        where: list[str] = ["1=1"]
+        args: list[Any] = []
         if f.key_id:
             where.append("key_id = ?")
             args.append(f.key_id)

@@ -193,3 +193,58 @@ def test_get_workspace_grounding_files():
     assert "Autonomous Agent Mode" in grounding
 
 
+def test_synthesize_tool_response_quality_checks():
+    from muse2api.core.tools import synthesize_tool_response
+
+    messages = [
+        {"role": "user", "content": "check for sonar, cc, pyrefly issues"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "terminal",
+                        "arguments": "cd /Users/Gaurav_Batra/muse2api && git status --short && .venv/bin/ruff check src tests",
+                    }
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "content": "All checks passed!\nINFO 0 errors\n0 errors, 0 warnings",
+        },
+    ]
+    syn = synthesize_tool_response(messages)
+    assert "Ruff / Flake8" in syn
+    assert "Pyrefly Type Diagnostics" in syn
+    assert "Pyright / Pylance" in syn
+
+
+def test_clean_git_command_trading_firm_multidrive():
+    from muse2api.core.tools import _clean_git_command
+
+    cmd = _clean_git_command("check git status of the trading firm repository and list last 3 commits")
+    assert cmd is not None
+    assert "/Volumes/Drive D/Indian Firm/Ai-indian-trading-firm" in cmd
+    assert "git status -s" in cmd
+    assert "git log -n 3 --oneline" in cmd
+
+
+def test_clean_git_command_muse2api_multidrive():
+    from muse2api.core.tools import _clean_git_command
+
+    cmd = _clean_git_command("check git status in muse2api")
+    assert cmd is not None
+    assert "/Users/Gaurav_Batra/muse2api" in cmd
+    assert "git status -s" in cmd
+
+
+def test_clean_git_command_stop_words():
+    from muse2api.core.tools import _clean_git_command
+
+    cmd = _clean_git_command("show git diff of the repository")
+    assert cmd == "git diff"
+
+
+
+

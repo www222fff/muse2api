@@ -17,7 +17,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncIterator
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
@@ -39,7 +39,7 @@ def _approx_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
-def _sse(payload: dict | str) -> bytes:
+def _sse(payload: dict[str, Any] | str) -> bytes:
     data = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
     return f"data: {data}\n\n".encode()
 
@@ -60,24 +60,25 @@ _TOOL_ITEMS = {"function_call", "function_call_output", "reasoning", "computer_c
                "file_search_call", "web_search_call"}
 
 
-def _input_item_to_message(item) -> dict:
+def _input_item_to_message(item: Any) -> dict[str, Any]:
     """Convert one Responses ``input`` list item to a chat-style message."""
     if not isinstance(item, dict):
         raise InvalidRequest("input items must be objects")
-    itype = item.get("type")
+    d = cast(dict[str, Any], item)
+    itype = d.get("type")
     if itype in _TOOL_ITEMS:
         raise InvalidRequest(
             f"input item type '{itype}' is not supported: "
             "muse.ai has no function calling")
-    if "role" in item or itype in ("message", None):
-        return {"role": item.get("role", "user"),
-                "content": item.get("content")}
+    if "role" in d or itype in ("message", None):
+        return {"role": d.get("role", "user"),
+                "content": d.get("content")}
     raise InvalidRequest(f"unsupported input item type '{itype}'")
 
 
-def _to_messages(body: ResponseRequest) -> list[dict]:
+def _to_messages(body: ResponseRequest) -> list[dict[str, Any]]:
     """Convert Responses ``input`` / ``instructions`` to chat-style messages."""
-    messages: list[dict] = []
+    messages: list[dict[str, Any]] = []
     if body.instructions:
         messages.append({"role": "system", "content": body.instructions})
     inp = body.input
@@ -85,18 +86,19 @@ def _to_messages(body: ResponseRequest) -> list[dict]:
         if inp.strip():
             messages.append({"role": "user", "content": inp})
     elif isinstance(inp, list):
-        messages.extend(_input_item_to_message(item) for item in inp)
+        items = cast(list[Any], inp)
+        messages.extend(_input_item_to_message(item) for item in items)
     elif inp is not None:
         raise InvalidRequest("input must be a string or a list of items")
     return messages
 
 
-def _message_item(msg_id: str, text: str) -> dict:
+def _message_item(msg_id: str, text: str) -> dict[str, Any]:
     return {"id": msg_id, "type": "message", "status": "completed", "role": "assistant",
             "content": [{"type": "output_text", "annotations": [], "text": text}]}
 
 
-def _usage(input_text: str, output_text: str) -> dict:
+def _usage(input_text: str, output_text: str) -> dict[str, Any]:
     i, o = _approx_tokens(input_text), _approx_tokens(output_text)
     return {"input_tokens": i, "output_tokens": o, "total_tokens": i + o,
             "input_tokens_details": {"cached_tokens": 0},
@@ -104,7 +106,7 @@ def _usage(input_text: str, output_text: str) -> dict:
 
 
 def _response_object(resp_id: str, msg_id: str, created: int, model: str, text: str,
-                     input_text: str, *, status: str = "completed") -> dict:
+                     input_text: str, *, status: str = "completed") -> dict[str, Any]:
     return {"id": resp_id, "object": "response", "created_at": created, "model": model,
             "status": status,
             "output": [_message_item(msg_id, text)] if status == "completed" else [],
@@ -112,7 +114,7 @@ def _response_object(resp_id: str, msg_id: str, created: int, model: str, text: 
             "tool_choice": "auto", "tools": []}
 
 
-async def _collect_first(stream, svc):
+async def _collect_first(stream: AsyncIterator[str], svc: Services) -> tuple[str, list[bytes]]:
     """Pre-fetch the first delta; emit SSE heartbeats while waiting (C4)."""
     interval = float(svc.settings.stream_heartbeat_interval)
     if interval <= 0:
@@ -136,9 +138,9 @@ async def _collect_first(stream, svc):
             pending.cancel()
 
 
-@router.post("/v1/responses")
+@router.post("/v1/responses", response_model=None)
 async def create_response(body: ResponseRequest, request: Request,
-                          svc: Annotated[Services, Depends(get_services)]):
+                          svc: Annotated[Services, Depends(get_services)]) -> dict[str, Any] | StreamingResponse:
     request.state.model = body.model  # logged even if it does not resolve
     spec = resolve_model(body.model, "chat")
     request.state.model = body.model or spec.id
@@ -200,7 +202,7 @@ async def create_response(body: ResponseRequest, request: Request,
             seq += 1
             produced = first or ""
 
-            def delta_event(delta: str) -> dict:
+            def delta_event(delta: str) -> dict[str, Any]:
                 return {"type": "response.output_text.delta", "sequence_number": seq,
                         "item_id": msg_id, "output_index": 0, "content_index": 0,
                         "delta": delta, "logprobs": []}
