@@ -1,6 +1,10 @@
 """Unit tests for workspace code extraction, auto-save, and repository rules."""
+
+from __future__ import annotations
+
 from pathlib import Path
 
+import pytest
 from workspace_helper import extract_file_edits, save_code_to_file
 
 
@@ -62,7 +66,7 @@ def foo():
     assert "aging_runner.py" in edits[0][0]
 
 
-def test_save_code_strips_prohibited_future_import(tmp_path: Path, monkeypatch):
+def test_save_code_strips_prohibited_future_import(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("workspace_helper.get_default_workspace", lambda: tmp_path)
     code = (
         '"""Docstring."""\n'

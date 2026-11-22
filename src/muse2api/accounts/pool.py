@@ -75,13 +75,15 @@ class RoundRobinStrategy:
     def __init__(self) -> None:
         self._counter = itertools.count()
 
-    def choose(self, candidates: list[Account], hint: str | None) -> Account:
+    def choose(self, candidates: list[Account], hint: str | None = None) -> Account:
+        _ = hint
         ordered = sorted(candidates, key=lambda a: a.id)
         return ordered[next(self._counter) % len(ordered)]
 
 
 class LRUStrategy:
-    def choose(self, candidates: list[Account], hint: str | None) -> Account:
+    def choose(self, candidates: list[Account], hint: str | None = None) -> Account:
+        _ = hint
         return min(candidates, key=lambda a: a.last_used_at)
 
 

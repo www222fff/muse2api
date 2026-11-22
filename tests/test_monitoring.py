@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import json
 
+import pytest
+from fastapi.testclient import TestClient
+
 from muse2api.auth.keys import hash_key
+from muse2api.config import Settings
 
 
 def _bearer(key: str) -> dict:
     return {"Authorization": f"Bearer {key}"}
 
 
-def _requests(client, admin, **params) -> list[dict]:
+def _requests(client: TestClient, admin: dict[str, str], **params):
     r = client.get("/admin/requests", headers=admin, params=params)
     assert r.status_code == 200
     return r.json()["data"]
@@ -29,7 +33,7 @@ def _assert_listed_key(listed: list[dict]) -> None:
     assert listed[0]["last_used_at"] > 0
 
 
-def test_key_lifecycle(client, admin, settings):
+def test_key_lifecycle(client: TestClient, admin: dict[str, str], settings: Settings):
     r = client.post("/admin/keys", headers=admin, json={"name": "alice", "note": "laptop"})
     assert r.status_code == 200
     body = r.json()
@@ -54,12 +58,12 @@ def test_key_lifecycle(client, admin, settings):
     assert client.delete(f"/admin/keys/{key['id']}", headers=admin).status_code == 404
 
 
-def test_keys_require_admin(client, auth):
+def test_keys_require_admin(client: TestClient, auth: dict[str, str]):
     assert client.get("/admin/keys", headers=auth).status_code == 401
     assert client.post("/admin/keys", headers=auth, json={"name": "x"}).status_code == 401
 
 
-def test_legacy_and_admin_keys_still_work(client, auth, admin):
+def test_legacy_and_admin_keys_still_work(client: TestClient, auth: dict[str, str], admin: dict[str, str]):
     assert client.get("/v1/models", headers=auth).status_code == 200
     assert client.get("/v1/models", headers=admin).status_code == 200
     assert client.get("/v1/models", headers=_bearer("m2a-nope")).status_code == 401
@@ -67,7 +71,7 @@ def test_legacy_and_admin_keys_still_work(client, auth, admin):
     assert names == [None, "admin", "legacy"]
 
 
-def test_request_logged(client, admin):
+def test_request_logged(client: TestClient, admin: dict[str, str]):
     key = client.post("/admin/keys", headers=admin, json={"name": "bob"}).json()
     headers = {**_bearer(key["api_key"]), "cf-connecting-ip": "203.0.113.7"}
     r = client.post("/v1/chat/completions", headers=headers, json={
@@ -88,7 +92,7 @@ def test_request_logged(client, admin):
     assert row["error"] is None
 
 
-def test_stream_and_error_logged(client, auth, admin):
+def test_stream_and_error_logged(client: TestClient, auth: dict[str, str], admin: dict[str, str]):
     with client.stream("POST", "/v1/chat/completions", headers=auth, json={
         "messages": [{"role": "user", "content": "s"}], "stream": True}) as r:
         assert r.status_code == 200
@@ -107,7 +111,7 @@ def test_stream_and_error_logged(client, auth, admin):
     assert [x["id"] for x in _requests(client, admin, status="2xx")] == [streamed["id"]]
 
 
-def test_polls_flagged_and_media_skipped(client, auth, admin):
+def test_polls_flagged_and_media_skipped(client: TestClient, auth: dict[str, str], admin: dict[str, str]):
     task = client.post("/v1/videos", headers=auth, json={"prompt": "a wave"}).json()
     assert client.get(f"/v1/videos/{task['id']}", headers=auth).status_code == 200
     client.get("/v1/media/does-not-exist.png")
@@ -121,7 +125,7 @@ def test_polls_flagged_and_media_skipped(client, auth, admin):
     assert [r["path"] for r in _requests(client, admin, hide_polls="true")] == ["/v1/videos"]
 
 
-def test_stats_shape(client, auth, admin):
+def test_stats_shape(client: TestClient, auth: dict[str, str], admin: dict[str, str]):
     client.get("/v1/models", headers=auth)
     client.get("/v1/models")  # 401
     r = client.get("/admin/stats", headers=admin, params={"window": "1h"})
@@ -164,7 +168,7 @@ def _assert_raw_usage_rows(raw: dict, alice_key_id: str) -> None:
     assert None not in rows  # unauthenticated requests have no key
 
 
-def test_key_usage(client, auth, admin):
+def test_key_usage(client: TestClient, auth: dict[str, str], admin: dict[str, str]):
     alice = client.post("/admin/keys", headers=admin, json={"name": "alice"}).json()
     client.post("/admin/keys", headers=admin, json={"name": "idle"})
     a = _bearer(alice["api_key"])
@@ -186,7 +190,7 @@ def test_key_usage(client, auth, admin):
     assert client.get("/admin/keys/usage", headers=auth).status_code == 401
 
 
-async def test_key_usage_windows(settings):
+async def test_key_usage_windows(settings: Settings):
     import time
 
     from muse2api.services.request_log import RequestLog
@@ -207,7 +211,7 @@ async def test_key_usage_windows(settings):
     await log.close()
 
 
-async def test_prune(settings):
+async def test_prune(settings: Settings):
     from muse2api.services.request_log import RequestLog
 
     log = RequestLog(settings.requests_db)
@@ -219,14 +223,14 @@ async def test_prune(settings):
     await log.close()
 
 
-def test_dashboard_html(client):
+def test_dashboard_html(client: TestClient):
     r = client.get("/dashboard")
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/html")
     assert "<title>muse2api dashboard</title>" in r.text
 
 
-def _wait_task(client, auth, task_id: str) -> dict:
+def _wait_task(client: TestClient, auth: dict[str, str], task_id: str):
     import time
 
     for _ in range(200):
@@ -237,7 +241,7 @@ def _wait_task(client, auth, task_id: str) -> dict:
     raise AssertionError(f"task {task_id} did not finish")
 
 
-def test_failed_task_counts_as_error(client, auth, admin, monkeypatch):
+def test_failed_task_counts_as_error(client: TestClient, auth: dict[str, str], admin: dict[str, str], monkeypatch: pytest.MonkeyPatch):
     from muse2api.drivers.mock import MockDriver
     from muse2api.errors import UpstreamTimeout
 
@@ -275,7 +279,7 @@ def test_failed_task_counts_as_error(client, auth, admin, monkeypatch):
     assert usage["requests_24h"] == 2 and usage["errors_24h"] == 1
 
 
-async def test_task_outcome_before_row_and_backfill(settings):
+async def test_task_outcome_before_row_and_backfill(settings: Settings):
     import time
     from types import SimpleNamespace
 

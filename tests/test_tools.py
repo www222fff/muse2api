@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 
+import pytest
+from fastapi.testclient import TestClient
+
 from muse2api.core.prompt import flatten_messages
 from muse2api.core.tools import (
     extract_tool_calls,
@@ -111,11 +114,11 @@ def test_flatten_messages_with_tools():
     assert "On branch main" in flat.text
 
 
-def test_api_tool_calling_non_stream(client, auth, monkeypatch):
+def test_api_tool_calling_non_stream(client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch):
     async def mock_stream(account, req):
         yield '<tool_call>{"name": "terminal", "arguments": {"command": "git status"}}</tool_call>'
 
-    monkeypatch.setattr(client.app.state.services.gateway.driver, "chat_stream", mock_stream)
+    monkeypatch.setattr(getattr(client.app, "state").services.gateway.driver, "chat_stream", mock_stream)
     r = client.post("/v1/chat/completions", headers=auth, json={
         "messages": [{"role": "user", "content": "git status"}],
         "tools": [{"type": "function", "function": {"name": "terminal"}}],
@@ -126,11 +129,11 @@ def test_api_tool_calling_non_stream(client, auth, monkeypatch):
     assert body["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "terminal"
 
 
-def test_api_tool_calling_stream(client, auth, monkeypatch):
+def test_api_tool_calling_stream(client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch):
     async def mock_stream(account, req):
         yield '<tool_call>{"name": "terminal", "arguments": {"command": "git log"}}</tool_call>'
 
-    monkeypatch.setattr(client.app.state.services.gateway.driver, "chat_stream", mock_stream)
+    monkeypatch.setattr(getattr(client.app, "state").services.gateway.driver, "chat_stream", mock_stream)
     with client.stream("POST", "/v1/chat/completions", headers=auth, json={
         "messages": [{"role": "user", "content": "git log"}],
         "tools": [{"type": "function", "function": {"name": "terminal"}}],

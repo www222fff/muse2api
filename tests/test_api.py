@@ -4,24 +4,29 @@ import base64
 import json
 import time
 
+import pytest
+from fastapi.testclient import TestClient
 
-def test_health(client):
+from muse2api.config import Settings
+
+
+def test_health(client: TestClient):
     assert client.get("/healthz").json()["ok"] is True
     assert client.get("/readyz").json()["ready"] is True
 
 
-def test_auth_required(client):
+def test_auth_required(client: TestClient):
     r = client.get("/v1/models")
     assert r.status_code == 401
     assert r.json()["error"]["code"] == "invalid_api_key"
 
 
-def test_models(client, auth):
+def test_models(client: TestClient, auth: dict[str, str]):
     ids = {m["id"] for m in client.get("/v1/models", headers=auth).json()["data"]}
     assert {"muse-chat", "muse-image", "muse-video", "gpt-4o"} <= ids
 
 
-def test_chat_non_stream(client, auth):
+def test_chat_non_stream(client: TestClient, auth: dict[str, str]):
     r = client.post("/v1/chat/completions", headers=auth, json={
         "model": "gpt-4o", "messages": [{"role": "user", "content": "hello"}]})
     assert r.status_code == 200
@@ -31,7 +36,7 @@ def test_chat_non_stream(client, auth):
     assert "hello" in body["choices"][0]["message"]["content"]
 
 
-def test_chat_stream(client, auth):
+def test_chat_stream(client: TestClient, auth: dict[str, str]):
     with client.stream("POST", "/v1/chat/completions", headers=auth, json={
         "messages": [{"role": "user", "content": "stream me"}], "stream": True,
         "stream_options": {"include_usage": True},
@@ -45,13 +50,13 @@ def test_chat_stream(client, auth):
     assert chunks[-1]["usage"]["total_tokens"] > 0
 
 
-def test_chat_wrong_model_kind(client, auth):
+def test_chat_wrong_model_kind(client: TestClient, auth: dict[str, str]):
     r = client.post("/v1/chat/completions", headers=auth, json={
         "model": "muse-video", "messages": [{"role": "user", "content": "x"}]})
     assert r.status_code == 400
 
 
-def test_image_url_and_media(client, auth):
+def test_image_url_and_media(client: TestClient, auth: dict[str, str]):
     r = client.post("/v1/images/generations", headers=auth,
                     json={"prompt": "a cat", "n": 2, "size": "1:1"})
     assert r.status_code == 200
@@ -63,24 +68,24 @@ def test_image_url_and_media(client, auth):
     assert media.headers["content-type"] == "image/png"
 
 
-def test_image_b64(client, auth):
+def test_image_b64(client: TestClient, auth: dict[str, str]):
     r = client.post("/v1/images/generations", headers=auth,
                     json={"prompt": "a dog", "response_format": "b64_json"})
     assert r.json()["data"][0]["b64_json"]
 
 
-def _fake_matting(client, monkeypatch) -> list[bytes]:
+def _fake_matting(client: TestClient, monkeypatch: pytest.MonkeyPatch):
     seen: list[bytes] = []
 
     async def fake_remove(data: bytes) -> bytes:
         seen.append(data)
         return b"cutout-png"
 
-    monkeypatch.setattr(client.app.state.services.matting, "remove", fake_remove)
+    monkeypatch.setattr(getattr(client.app, "state").services.matting, "remove", fake_remove)
     return seen
 
 
-def test_image_transparent_background(client, auth, monkeypatch):
+def test_image_transparent_background(client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch):
     seen = _fake_matting(client, monkeypatch)
     r = client.post("/v1/images/generations", headers=auth,
                     json={"prompt": "a fox", "n": 2, "background": "transparent",
@@ -94,14 +99,14 @@ def test_image_transparent_background(client, auth, monkeypatch):
     assert "transparent" not in data[0]["revised_prompt"]
 
 
-def test_image_transparent_saved_as_png(client, auth, monkeypatch):
+def test_image_transparent_saved_as_png(client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch):
     _fake_matting(client, monkeypatch)
     r = client.post("/v1/images/generations", headers=auth,
                     json={"prompt": "a fox", "background": "transparent"})
     assert r.json()["data"][0]["url"].endswith(".png")
 
 
-def test_image_opaque_background_skips_matting(client, auth, monkeypatch):
+def test_image_opaque_background_skips_matting(client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch):
     seen = _fake_matting(client, monkeypatch)
     r = client.post("/v1/images/generations", headers=auth,
                     json={"prompt": "a fox", "background": "opaque"})
@@ -110,9 +115,9 @@ def test_image_opaque_background_skips_matting(client, auth, monkeypatch):
     assert r.json()["data"][0]["revised_prompt"] == "a fox"
 
 
-def _capture_image_requests(client, monkeypatch):  # type: ignore[redeclaration]
+def _capture_image_requests(client: TestClient, monkeypatch: pytest.MonkeyPatch):
     seen = []
-    gateway = client.app.state.services.gateway
+    gateway = getattr(client.app, "state").services.gateway
     original = gateway.generate_image
 
     async def spy(req):
@@ -123,7 +128,7 @@ def _capture_image_requests(client, monkeypatch):  # type: ignore[redeclaration]
     return seen
 
 
-def test_image_reference_images(client, auth, monkeypatch):
+def test_image_reference_images(client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch):
     seen = _capture_image_requests(client, monkeypatch)
     png = base64.b64encode(b"\x89PNG fake").decode()
     r = client.post("/v1/images/generations", headers=auth,
@@ -135,7 +140,7 @@ def test_image_reference_images(client, auth, monkeypatch):
     assert refs[0].data == b"\x89PNG fake"
 
 
-def test_image_single_reference_string(client, auth, monkeypatch):
+def test_image_single_reference_string(client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch):
     seen = _capture_image_requests(client, monkeypatch)
     png = base64.b64encode(b"x").decode()
     r = client.post("/v1/images/generations", headers=auth,
@@ -144,19 +149,19 @@ def test_image_single_reference_string(client, auth, monkeypatch):
     assert len(seen[0].reference_images) == 1
 
 
-def test_image_too_many_references(client, auth):
+def test_image_too_many_references(client: TestClient, auth: dict[str, str]):
     png = "data:image/png;base64," + base64.b64encode(b"x").decode()
     r = client.post("/v1/images/generations", headers=auth, json={"prompt": "p", "image": [png] * 5})
     assert r.status_code == 400
 
 
-def test_image_invalid_background(client, auth):
+def test_image_invalid_background(client: TestClient, auth: dict[str, str]):
     r = client.post("/v1/images/generations", headers=auth,
                     json={"prompt": "a fox", "background": "glass"})
     assert r.status_code == 400
 
 
-def test_image_async_task(client, auth):
+def test_image_async_task(client: TestClient, auth: dict[str, str]):
     import time
     png = "data:image/png;base64," + base64.b64encode(b"x").decode()
     r = client.post("/v1/images/generations", headers=auth,
@@ -175,11 +180,11 @@ def test_image_async_task(client, auth):
     assert media.status_code == 200 and media.headers["content-type"] == "image/png"
 
 
-def test_image_task_not_found(client, auth):
+def test_image_task_not_found(client: TestClient, auth: dict[str, str]):
     assert client.get("/v1/images/generations/task_nope", headers=auth).status_code == 404
 
 
-def test_video_task(client, auth):
+def test_video_task(client: TestClient, auth: dict[str, str]):
     r = client.post("/v1/videos", headers=auth, json={"prompt": "waves", "duration": 5})
     task_id = r.json()["id"]
     for _ in range(50):
@@ -191,8 +196,8 @@ def test_video_task(client, auth):
     assert task["result"]["url"].endswith(".mp4")  # type: ignore[possibly-unbound]
 
 
-def _capture_chat_requests(client, monkeypatch) -> list:
-    gateway = client.app.state.services.gateway
+def _capture_chat_requests(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    gateway = getattr(client.app, "state").services.gateway
     original, seen = gateway.chat_stream, []
 
     async def spy(req):
@@ -204,7 +209,7 @@ def _capture_chat_requests(client, monkeypatch) -> list:
     return seen
 
 
-def test_conversation_key_is_scoped_by_api_key(client, auth, admin, monkeypatch):
+def test_conversation_key_is_scoped_by_api_key(client: TestClient, auth: dict[str, str], admin: dict[str, str], monkeypatch: pytest.MonkeyPatch):
     seen = _capture_chat_requests(client, monkeypatch)
     other = client.post("/admin/keys", headers=admin, json={"name": "other"}).json()
     body = {"model": "muse-chat", "user": "alice", "messages": [{"role": "user", "content": "hi"}]}
@@ -219,7 +224,7 @@ def test_conversation_key_is_scoped_by_api_key(client, auth, admin, monkeypatch)
     assert hints == ["legacy:alice", f"{other['key']['id']}:alice", "legacy:alice", None]
 
 
-def test_responses_non_stream_string_input(client, auth):
+def test_responses_non_stream_string_input(client: TestClient, auth: dict[str, str]):
     r = client.post("/v1/responses", headers=auth, json={"input": "hello"})
     assert r.status_code == 200
     body = r.json()
@@ -232,7 +237,7 @@ def test_responses_non_stream_string_input(client, auth):
     assert body["usage"]["total_tokens"] > 0
 
 
-def test_responses_items_and_instructions(client, auth, monkeypatch):
+def test_responses_items_and_instructions(client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch):
     seen = _capture_chat_requests(client, monkeypatch)
     r = client.post("/v1/responses", headers=auth, json={
         "instructions": "be terse",
@@ -245,7 +250,7 @@ def test_responses_items_and_instructions(client, auth, monkeypatch):
     assert seen[0].turns[0] == ("system", "be terse")
 
 
-def test_responses_stream(client, auth):
+def test_responses_stream(client: TestClient, auth: dict[str, str]):
     with client.stream("POST", "/v1/responses", headers=auth, json={
         "input": "stream me", "stream": True,
     }) as r:
@@ -269,7 +274,7 @@ def test_responses_stream(client, auth):
     assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
 
 
-def test_responses_rejects_bad_input(client, auth):
+def test_responses_rejects_bad_input(client: TestClient, auth: dict[str, str]):
     empty = client.post("/v1/responses", headers=auth, json={"input": "  "})
     assert empty.status_code == 400
     tools = client.post("/v1/responses", headers=auth, json={
@@ -279,22 +284,10 @@ def test_responses_rejects_bad_input(client, auth):
     assert "function calling" in tools.json()["error"]["message"]
 
 
-def _capture_image_requests(client, monkeypatch) -> list:
-    gateway = client.app.state.services.gateway
-    original, seen = gateway.generate_image, []
-
-    async def spy(req):
-        seen.append(req)
-        return await original(req)
-
-    monkeypatch.setattr(gateway, "generate_image", spy)
-    return seen
-
-
 _PNG_DATA_URL = "data:image/png;base64," + base64.b64encode(b"\x89PNG-ref").decode()
 
 
-def test_image_generation_with_reference(client, auth, monkeypatch):
+def test_image_generation_with_reference(client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch):
     seen = _capture_image_requests(client, monkeypatch)
     r = client.post("/v1/images/generations", headers=auth,
                     json={"prompt": "same fox, wearing a scarf", "image": _PNG_DATA_URL})
@@ -303,13 +296,13 @@ def test_image_generation_with_reference(client, auth, monkeypatch):
     assert [(i.data, i.mime) for i in refs] == [(b"\x89PNG-ref", "image/png")]
 
 
-def test_image_generation_reference_list_limit(client, auth):
+def test_image_generation_reference_list_limit(client: TestClient, auth: dict[str, str]):
     r = client.post("/v1/images/generations", headers=auth,
                     json={"prompt": "x", "image": [_PNG_DATA_URL] * 5})
     assert r.status_code == 400
 
 
-def test_image_edits_multipart(client, auth, monkeypatch):
+def test_image_edits_multipart(client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch):
     seen = _capture_image_requests(client, monkeypatch)
     r = client.post("/v1/images/edits", headers=auth,
                     data={"prompt": "put them in a cafe", "n": "1", "response_format": "b64_json"},
@@ -324,7 +317,7 @@ def test_image_edits_multipart(client, auth, monkeypatch):
         (b"img-a", "image/png"), (b"img-b", "image/jpeg")]
 
 
-def test_image_edits_rejects_bad_input(client, auth):
+def test_image_edits_rejects_bad_input(client: TestClient, auth: dict[str, str]):
     png = ("image", ("a.png", b"img", "image/png"))
     no_image = client.post("/v1/images/edits", headers=auth, data={"prompt": "x"})
     assert no_image.status_code == 400
@@ -336,7 +329,7 @@ def test_image_edits_rejects_bad_input(client, auth):
     assert bad_n.status_code == 400
 
 
-def test_admin_account_quota(client, admin):
+def test_admin_account_quota(client: TestClient, admin: dict[str, str]):
     r = client.post("/admin/accounts", headers=admin,
                     json={"label": "q1", "cookies": {"hatch_sess": "secretvalue123"}})
     acc_id = r.json()["account"]["id"]
@@ -354,7 +347,7 @@ def test_admin_account_quota(client, admin):
     assert listed["meta"]["quota"]["plan"] == "free"
 
 
-def test_admin_accounts_crud(client, auth, admin):
+def test_admin_accounts_crud(client: TestClient, auth: dict[str, str], admin: dict[str, str]):
     assert client.get("/admin/accounts", headers=auth).status_code == 401
 
     r = client.post("/admin/accounts", headers=admin,
@@ -373,7 +366,7 @@ def test_admin_accounts_crud(client, auth, admin):
     assert client.get("/admin/status", headers=admin).json()["accounts"]["total"] == 0
 
 
-def test_admin_account_cookie_header_string(client, admin):
+def test_admin_account_cookie_header_string(client: TestClient, admin: dict[str, str]):
     r = client.post("/admin/accounts", headers=admin,
                     json={"label": "hdr", "cookies": "hatch_sess=abc123; hatch_vml=xyz; empty="})
     assert r.status_code == 200
@@ -386,7 +379,7 @@ def test_admin_account_cookie_header_string(client, admin):
     assert "hatch_gw" not in r.json()["missing_cookies"]
 
 
-def test_admin_account_cookie_export_list(client, admin):
+def test_admin_account_cookie_export_list(client: TestClient, admin: dict[str, str]):
     r = client.post("/admin/accounts", headers=admin, json={
         "label": "exp", "cookies": [
             {"name": "hatch_sess", "value": "abc123", "expirationDate": 1790000000.5,
@@ -399,7 +392,7 @@ def test_admin_account_cookie_export_list(client, admin):
     assert listed[acc_id]["cookie_expires"] == {"hatch_sess": 1790000000}
 
 
-def test_admin_account_cookie_bad_format(client, admin):
+def test_admin_account_cookie_bad_format(client: TestClient, admin: dict[str, str]):
     bad_entry = client.post("/admin/accounts", headers=admin,
                             json={"cookies": [{"value": "no-name"}]})
     assert bad_entry.status_code == 400
@@ -407,7 +400,7 @@ def test_admin_account_cookie_bad_format(client, admin):
     assert empty.status_code == 400
 
 
-def test_admin_accounts_bulk_import(client, admin):
+def test_admin_accounts_bulk_import(client: TestClient, admin: dict[str, str]):
     r = client.post("/admin/accounts/import", headers=admin, json={"accounts": [
         {"label": "b1", "cookies": {"hatch_sess": "one"}},
         {"label": "b2", "cookies": "hatch_sess=two; hatch_vml=three"},
@@ -420,7 +413,7 @@ def test_admin_accounts_bulk_import(client, admin):
     assert client.get("/admin/status", headers=admin).json()["accounts"]["total"] == 2
 
 
-def test_chat_stream_heartbeat(settings, auth):
+def test_chat_stream_heartbeat(settings: Settings, auth: dict[str, str]):
     # C4: with stream_heartbeat_interval set, the 200 goes out immediately and
     # ': keepalive' SSE comments precede the first data chunk.
     from fastapi.testclient import TestClient
@@ -447,7 +440,7 @@ def test_chat_stream_heartbeat(settings, auth):
     assert "slow stream" in text
 
 
-def test_chat_stream_no_heartbeat_by_default(client, auth):
+def test_chat_stream_no_heartbeat_by_default(client: TestClient, auth: dict[str, str]):
     # Default (interval 0): no ': keepalive' comments; first token awaited pre-200.
     with client.stream("POST", "/v1/chat/completions", headers=auth, json={
         "messages": [{"role": "user", "content": "no heartbeat"}], "stream": True,
@@ -457,7 +450,7 @@ def test_chat_stream_no_heartbeat_by_default(client, auth):
     assert not any(ln.startswith(":") for ln in lines)
 
 
-def test_chat_stream_heartbeat_upstream_error(settings, auth):
+def test_chat_stream_heartbeat_upstream_error(settings: Settings, auth: dict[str, str]):
     # Heartbeat mode commits the 200 before the first token, so an upstream
     # failure surfaces as an SSE error event instead of an HTTP error.
     from fastapi.testclient import TestClient

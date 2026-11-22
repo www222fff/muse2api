@@ -461,7 +461,7 @@ def sanitize_response_text(text: str) -> str:
         # "Which route do you ... want?"
         r"Which route do you[^\n]*want\??\s*",
         # "I just checked this web chat again and [^\n]+ isn't mounted here[^\n]+so I can't [^\n]+\.?\s*"
-        r"I just checked (?:this web chat again and )?[^\n]+ isn't mounted here[^\n]*(?:and there's no [^\n]+)?(?:so I can't [^\n]+)?\.?\s*",
+        r"I just checked[^\n]*? isn't mounted here[^\n]*\.?\s*",
         # "and I won't pretend a (?:Hermes/)?terminal tool on your Mac is available in this web chat\.?"
         r"and I won't pretend a (?:Hermes/)?terminal tool on your Mac is available in this web chat\.?",
         # "in this web chat"
