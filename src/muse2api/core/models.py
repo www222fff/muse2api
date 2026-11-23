@@ -70,5 +70,6 @@ def resolve_model(name: str | None, kind: ModelKind) -> ModelSpec:
     if spec is None:
         return MODELS[DEFAULT_BY_KIND[kind]]
     if spec.kind != kind:
-        raise InvalidRequest(f"model '{name}' is a {spec.kind} model, expected {kind}")
+        message = f"model '{name}' is a {spec.kind} model, expected {kind}"
+        raise InvalidRequest(message)
     return spec

@@ -8,14 +8,17 @@ protocol, ...) only needs to implement this class.
 
 from __future__ import annotations
 
-import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
-from ..accounts.model import Account
 from ..errors import FeatureNotImplemented
+
+if TYPE_CHECKING:
+    import asyncio
+
+    from ..accounts.model import Account
 
 ProgressCallback = Callable[[int], None]
 """Receives a 0-100 progress estimate."""
@@ -111,18 +114,23 @@ class MuseDriver(ABC):
     async def health(self) -> dict[str, Any]:
         return {"driver": self.name, "ok": True}
 
+    def _unsupported(self, what: str) -> NoReturn:
+        """Raise FeatureNotImplemented for a capability this driver lacks."""
+        message = f"driver '{self.name}' does not support {what}"
+        raise FeatureNotImplemented(message)
+
     @abstractmethod
     def chat_stream(self, account: Account, req: ChatRequest) -> AsyncIterator[str]:
         """Yield assistant text deltas. Implementations are async generators."""
 
-    async def generate_image(self, account: Account, req: ImageRequest) -> list[MediaResult]:
-        raise FeatureNotImplemented(f"driver '{self.name}' does not support image generation")
+    async def generate_image(self, account: Account, req: ImageRequest) -> list[MediaResult]:  # noqa: ARG002
+        self._unsupported("image generation")
 
-    async def generate_video(self, account: Account, req: VideoRequest) -> MediaResult:
-        raise FeatureNotImplemented(f"driver '{self.name}' does not support video generation")
+    async def generate_video(self, account: Account, req: VideoRequest) -> MediaResult:  # noqa: ARG002
+        self._unsupported("video generation")
 
-    async def renew_session(self, account: Account) -> SessionInfo:
-        raise FeatureNotImplemented(f"driver '{self.name}' does not support session renewal")
+    async def renew_session(self, account: Account) -> SessionInfo:  # noqa: ARG002
+        self._unsupported("session renewal")
 
-    async def quota(self, account: Account) -> dict[str, Any]:
-        raise FeatureNotImplemented(f"driver '{self.name}' does not support quota lookup")
+    async def quota(self, account: Account) -> dict[str, Any]:  # noqa: ARG002
+        self._unsupported("quota lookup")

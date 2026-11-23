@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import types
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from functools import wraps
@@ -39,7 +40,8 @@ class _AsyncContextManager(AbstractAsyncContextManager[_T]):
         return await self._agen.__anext__()
 
     async def __aexit__(self, typ: type[BaseException] | None,
-                        value: BaseException | None, traceback: Any) -> bool:
+                        value: BaseException | None,
+                        traceback: types.TracebackType | None) -> bool:
         if self._agen is None:
             return False
         try:
@@ -99,7 +101,6 @@ class Gateway:
                     async for delta in self.driver.chat_stream(lease.account, req):
                         emitted = True
                         yield delta
-                    return
                 except UpstreamError as exc:
                     lease.fail(exc)
                     tried.append(lease.account.id)
@@ -107,6 +108,8 @@ class Gateway:
                     if emitted or not self._should_retry(exc, attempt, tried):
                         raise
                     log.warning("chat failed on %s (%s), failing over", lease.account.id, exc)
+                    continue
+                return
 
     async def _run(self, fn: Callable[[Account], Awaitable[T]], hint: str | None = None,
                    kind: str | None = None) -> T:
@@ -121,7 +124,8 @@ class Gateway:
                     if not self._should_retry(exc, attempt, tried, kind):
                         raise
                     log.warning("call failed on %s (%s), failing over", lease.account.id, exc)
-        raise AssertionError("unreachable")
+        message = "unreachable"
+        raise AssertionError(message)
 
     async def generate_image(self, req: ImageRequest) -> list[MediaResult]:
         return await self._run(lambda acc: self.driver.generate_image(acc, req))

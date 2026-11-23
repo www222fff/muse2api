@@ -527,9 +527,7 @@ def _collect_simple_matches(
 def _resolve_fallback_target(prompt: str, reply: str, paths: list[Path] | None) -> str | None:
     """Resolve the single target file for the fallback extraction pattern."""
     py_matches = _RE_EDIT_PATH.findall(f"{prompt} {reply}")
-    valid_py = [
-        f for f in py_matches if not f.startswith("python") and ("/" in f or f.endswith(".py"))
-    ]
+    valid_py = [f for f in py_matches if _is_editable_py_path(f)]
     if valid_py:
         return valid_py[0]
     if paths:
@@ -539,9 +537,40 @@ def _resolve_fallback_target(prompt: str, reply: str, paths: list[Path] | None) 
     return None
 
 
+def _is_editable_py_path(path: str) -> bool:
+    """A path that names a real file (not a language tag)."""
+    return not path.startswith("python") and ("/" in path or path.endswith(".py"))
+
+
+def _collect_save_match(reply: str, seen_targets: set[str]) -> list[tuple[str, str]]:
+    """Edits from a ``/save <path>`` marker plus the following code block."""
+    save_match = _RE_EDIT_SAVE.search(reply)
+    if not save_match:
+        return []
+    tgt = save_match.group(1).strip().strip("`*")
+    code = extract_code_block(reply)
+    if tgt and code and tgt not in seen_targets:
+        seen_targets.add(tgt)
+        return [(tgt, code)]
+    return []
+
+
 def _has_edit_intent(prompt: str) -> bool:
     lowered = prompt.lower()
     return any(word in lowered for word in _EDIT_INTENT_KEYWORDS)
+
+
+def _collect_fallback_edit(reply: str, prompt: str, paths: list[Path] | None,
+                           seen_targets: set[str]) -> list[tuple[str, str]]:
+    """One edit when a single target file was requested and a code block exists."""
+    code = extract_code_block(reply)
+    if not code or len(code.splitlines()) < 2:
+        return []
+    target_file = _resolve_fallback_target(prompt, reply, paths)
+    if target_file and target_file not in seen_targets and _has_edit_intent(prompt):
+        seen_targets.add(target_file)
+        return [(target_file, code)]
+    return []
 
 
 def extract_file_edits(
@@ -560,21 +589,11 @@ def extract_file_edits(
     edits += _collect_simple_matches(_RE_EDIT_FILE, reply, seen_targets, strip_ticks=True)
 
     # Pattern 3: Save with: /save path/to/file.ext or /save path/to/file.ext in text
-    save_match = _RE_EDIT_SAVE.search(reply)
-    if save_match:
-        tgt = save_match.group(1).strip().strip("`*")
-        code = extract_code_block(reply)
-        if tgt and code and tgt not in seen_targets:
-            seen_targets.add(tgt)
-            edits.append((tgt, code))
+    edits += _collect_save_match(reply, seen_targets)
 
     # Pattern 4: Fallback if single target file was requested in prompt or passed in paths
     if not edits:
-        code = extract_code_block(reply)
-        if code and len(code.splitlines()) >= 2:
-            target_file = _resolve_fallback_target(prompt, reply, paths)
-            if target_file and target_file not in seen_targets and _has_edit_intent(prompt):
-                edits.append((target_file, code))
+        edits += _collect_fallback_edit(reply, prompt, paths, seen_targets)
 
     return edits
 

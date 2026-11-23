@@ -18,6 +18,23 @@ from typing import Any, cast
 
 from ..errors import FeatureNotImplemented
 
+try:
+    import numpy as np
+    from PIL import Image
+    from pymatting import estimate_foreground_ml  # type: ignore[import-not-found]
+    from rembg import new_session, remove  # type: ignore[import-not-found]
+except ImportError:
+    np = None  # type: ignore[assignment]
+    Image = None  # type: ignore[assignment]
+    estimate_foreground_ml = None  # type: ignore[assignment]
+    new_session = None  # type: ignore[assignment]
+    remove = None  # type: ignore[assignment]
+
+_MATTING_EXTRA = (
+    "background=transparent needs the optional matting extra: "
+    "pip install 'muse2api[matting]'"
+)
+
 
 class Matting:
     def __init__(self, model: str) -> None:
@@ -28,16 +45,9 @@ class Matting:
 
     def remove_sync(self, data: bytes) -> bytes:
         """Return ``data`` as an RGBA PNG with the background removed."""
-        try:
-            import numpy as np
-            from PIL import Image
-            from pymatting import estimate_foreground_ml  # type: ignore[import-not-found]
-            from rembg import new_session, remove  # type: ignore[import-not-found]
-        except ImportError as exc:
-            raise FeatureNotImplemented(
-                "background=transparent needs the optional matting extra: "
-                "pip install 'muse2api[matting]'"
-            ) from exc
+        if (np is None or Image is None or estimate_foreground_ml is None
+                or new_session is None or remove is None):
+            raise FeatureNotImplemented(_MATTING_EXTRA)
 
         src: Any = Image.open(io.BytesIO(data)).convert("RGB")
         with self._lock:

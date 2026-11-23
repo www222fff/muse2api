@@ -56,7 +56,8 @@ async def _generate(body: ImageGenerationRequest, refs: list[InputImage],
                     request: Request, svc: Services) -> dict[str, Any]:
     request.state.model = body.model or resolve_model(body.model, "image").id
     if len(refs) > MAX_REFERENCE_IMAGES:
-        raise InvalidRequest(f"at most {MAX_REFERENCE_IMAGES} reference images are supported")
+        message = f"at most {MAX_REFERENCE_IMAGES} reference images are supported"
+        raise InvalidRequest(message)
     if body.async_:
         return _submit(body, refs, request, svc)
     return await _run(body, refs, public_base(request), svc)
@@ -69,7 +70,7 @@ def _submit(body: ImageGenerationRequest, refs: list[InputImage], request: Reque
     body = body.model_copy(update={"response_format": "url"})  # keep base64 out of tasks.json
     base = public_base(request)
 
-    async def runner(progress: ProgressCallback) -> dict[str, Any]:
+    async def runner(_progress: ProgressCallback) -> dict[str, Any]:
         return await _run(body, refs, base, svc)
 
     meta: dict[str, Any] = {"model": spec.id, "prompt": body.prompt, "size": body.size,
@@ -98,7 +99,12 @@ async def _run(body: ImageGenerationRequest, refs: list[InputImage], base: str,
 @router.post("/v1/images/generations")
 async def generate_images(body: ImageGenerationRequest, request: Request,
                           svc: Annotated[Services, Depends(get_services)]) -> dict[str, Any]:
-    refs = body.image if isinstance(body.image, list) else [body.image] if body.image else []
+    if isinstance(body.image, list):
+        refs = body.image
+    elif body.image:
+        refs = [body.image]
+    else:
+        refs = []
     loaded = [InputImage(*(await load_image_ref(ref))) for ref in refs]
     return await _generate(body, loaded, request, svc)
 
@@ -106,15 +112,18 @@ async def generate_images(body: ImageGenerationRequest, request: Request,
 def _parse_edit_form(form: FormData) -> tuple[list[UploadFile], dict[str, str]]:
     """Split an edit multipart form into image files and string fields."""
     if form.get("mask") is not None:
-        raise InvalidRequest("mask is not supported; muse.ai cannot inpaint a region")
+        message = "mask is not supported; muse.ai cannot inpaint a region"
+        raise InvalidRequest(message)
     files = [f for key in ("image", "image[]") for f in cast(list[Any], form.getlist(key))
              if isinstance(f, UploadFile)]
     if not files:
-        raise InvalidRequest("at least one image file is required (field 'image' or 'image[]')")
-    fields: dict[str, str] = {}
-    for k, v in form.items():
-        if isinstance(v, str) and k not in ("image", "image[]"):
-            fields[str(k)] = v
+        message = "at least one image file is required (field 'image' or 'image[]')"
+        raise InvalidRequest(message)
+    fields = {
+        k: v
+        for k, v in form.items()
+        if isinstance(v, str) and k not in ("image", "image[]")
+    }
     return files, fields
 
 
@@ -151,6 +160,7 @@ async def get_image_task(task_id: str, request: Request,
                          svc: Annotated[Services, Depends(get_services)]) -> dict[str, Any]:
     task = svc.tasks.get(task_id)
     if task is None or task.kind != "image":
-        raise NotFound(f"image task '{task_id}' not found")
+        message = f"image task '{task_id}' not found"
+        raise NotFound(message)
     request.state.model = task.request.get("model")
     return _task_view(task)

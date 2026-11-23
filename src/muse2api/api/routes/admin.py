@@ -36,8 +36,8 @@ EXTENSION_DIR = Path(__file__).resolve().parents[2] / "web" / "extension"
 def _parse_cookie_header(value: str) -> dict[str, str]:
     """Parse a raw ``Cookie`` header string into a name -> value dict."""
     cookies: dict[str, str] = {}
-    for part in value.split(";"):
-        part = part.strip()
+    for raw_part in value.split(";"):
+        part = raw_part.strip()
         if not part or "=" not in part:
             continue
         name, _, val = part.partition("=")
@@ -53,10 +53,12 @@ def _parse_cookie_list(value: list[Any]) -> tuple[dict[str, str], dict[str, int]
     expires: dict[str, int] = {}
     for i, entry in enumerate(value):
         if not isinstance(entry, dict):
-            raise InvalidRequest(f"cookies[{i}] must be an object with 'name' and 'value'")
+            message = f"cookies[{i}] must be an object with 'name' and 'value'"
+            raise InvalidRequest(message)
         e = cast(dict[str, Any], entry)
         if not e.get("name"):
-            raise InvalidRequest(f"cookies[{i}] must be an object with 'name' and 'value'")
+            message = f"cookies[{i}] must be an object with 'name' and 'value'"
+            raise InvalidRequest(message)
         name = str(e["name"])
         cookies[name] = str(e.get("value", ""))
         exp = e.get("expirationDate")
@@ -64,7 +66,8 @@ def _parse_cookie_list(value: list[Any]) -> tuple[dict[str, str], dict[str, int]
             try:
                 expires[name] = int(float(exp))
             except (TypeError, ValueError):
-                raise InvalidRequest(f"cookies[{i}].expirationDate is not a number") from None
+                message = f"cookies[{i}].expirationDate is not a number"
+                raise InvalidRequest(message) from None
     return cookies, expires
 
 
@@ -75,12 +78,13 @@ def parse_cookies(value: Any) -> tuple[dict[str, str], dict[str, int]]:
     lists carry expiry info, the other formats return an empty dict.
     """
     if isinstance(value, dict):
-        return {str(k): str(v) for k, v in cast(dict[str, Any], value).items()}, {}
+        return dict(cast(dict[str, Any], value)), {}
     if isinstance(value, str):
         return _parse_cookie_header(value), {}
     if isinstance(value, list):
         return _parse_cookie_list(cast(list[Any], value))
-    raise InvalidRequest("cookies must be a dict, a raw 'Cookie' header string, or a cookie-export list")
+    message = "cookies must be a dict, a raw 'Cookie' header string, or a cookie-export list"
+    raise InvalidRequest(message)
 
 
 def _build_account(item: AccountCreate) -> Account:
@@ -89,7 +93,8 @@ def _build_account(item: AccountCreate) -> Account:
     cookies = {k: v for k, v in cookies.items() if v}
     expires = {k: v for k, v in expires.items() if k in cookies}
     if not cookies:
-        raise InvalidRequest("cookies must not be empty")
+        message = "cookies must not be empty"
+        raise InvalidRequest(message)
     return Account(label=item.label, cookies=cookies,
                    cookie_expires={**expires, **item.cookie_expires}, enabled=item.enabled)
 
@@ -97,7 +102,8 @@ def _build_account(item: AccountCreate) -> Account:
 def _get(svc: Services, account_id: str) -> Account:
     acc = svc.pool.get(account_id)
     if acc is None:
-        raise NotFound(f"account '{account_id}' not found")
+        message = f"account '{account_id}' not found"
+        raise NotFound(message)
     return acc
 
 
@@ -162,7 +168,8 @@ async def update_account(account_id: str, body: AccountUpdate,
 @router.delete("/accounts/{account_id}")
 async def delete_account(account_id: str, svc: Annotated[Services, Depends(get_services)]) -> dict[str, Any]:
     if not await svc.pool.remove(account_id):
-        raise NotFound(f"account '{account_id}' not found")
+        message = f"account '{account_id}' not found"
+        raise NotFound(message)
     return {"deleted": account_id}
 
 
@@ -185,7 +192,7 @@ async def renew(account_id: str, svc: Annotated[Services, Depends(get_services)]
 @router.get("/accounts/{account_id}/quota")
 async def account_quota(account_id: str,
                         svc: Annotated[Services, Depends(get_services)],
-                        refresh: bool = False) -> dict[str, Any]:
+                        *, refresh: bool = False) -> dict[str, Any]:
     """Ask the active driver for the account's quota snapshot and persist it in ``meta``.
 
     The browser driver caches each account's snapshot for 30 minutes
@@ -212,7 +219,8 @@ async def extension_zip() -> Response:
                    and not any(part.startswith(".") for part in f.relative_to(root).parts)
                    ) if root.is_dir() else []
     if not files:
-        raise NotFound("the browser extension is not bundled with this server")
+        message = "the browser extension is not bundled with this server"
+        raise NotFound(message)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for f in files:
@@ -236,7 +244,8 @@ async def cancel_task(task_id: str, svc: Annotated[Services, Depends(get_service
 def _get_key(svc: Services, key_id: str) -> ApiKey:
     key = svc.keys.get(key_id)
     if key is None:
-        raise NotFound(f"key '{key_id}' not found")
+        message = f"key '{key_id}' not found"
+        raise NotFound(message)
     return key
 
 
@@ -290,7 +299,8 @@ async def update_key(key_id: str, body: KeyUpdate, svc: Annotated[Services, Depe
 @router.delete("/keys/{key_id}")
 async def delete_key(key_id: str, svc: Annotated[Services, Depends(get_services)]) -> dict[str, Any]:
     if not await svc.keys.remove(key_id):
-        raise NotFound(f"key '{key_id}' not found")
+        message = f"key '{key_id}' not found"
+        raise NotFound(message)
     return {"deleted": key_id}
 
 

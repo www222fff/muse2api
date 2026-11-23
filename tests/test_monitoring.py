@@ -41,21 +41,19 @@ def test_key_lifecycle(client: TestClient, admin: dict[str, str], settings: Sett
     _assert_created_key(plaintext, key, settings.keys_file.read_text(encoding="utf-8"))
 
     assert client.get("/v1/models", headers=_bearer(plaintext)).status_code == 200
-    listed = client.get("/admin/keys", headers=admin).json()["data"]
-    _assert_listed_key(listed)
+    _assert_listed_key(client.get("/admin/keys", headers=admin).json()["data"])
 
-    r = client.patch(f"/admin/keys/{key['id']}", headers=admin, json={"revoked": True})
-    assert r.json()["key"]["revoked"] is True
-    assert client.get("/v1/models", headers=_bearer(plaintext)).status_code == 401
+    revoked = client.patch(f"/admin/keys/{key['id']}", headers=admin, json={"revoked": True})
+    assert (revoked.json()["key"]["revoked"], client.get("/v1/models", headers=_bearer(plaintext)).status_code) == (True, 401)
 
-    r = client.patch(f"/admin/keys/{key['id']}", headers=admin,
-                     json={"revoked": False, "name": "alice2"})
-    assert r.json()["key"]["name"] == "alice2"
-    assert client.get("/v1/models", headers=_bearer(plaintext)).status_code == 200
+    renamed = client.patch(f"/admin/keys/{key['id']}", headers=admin,
+                           json={"revoked": False, "name": "alice2"})
+    assert (renamed.json()["key"]["name"], client.get("/v1/models", headers=_bearer(plaintext)).status_code) == ("alice2", 200)
 
-    assert client.delete(f"/admin/keys/{key['id']}", headers=admin).status_code == 200
-    assert client.get("/v1/models", headers=_bearer(plaintext)).status_code == 401
-    assert client.delete(f"/admin/keys/{key['id']}", headers=admin).status_code == 404
+    deleted = client.delete(f"/admin/keys/{key['id']}", headers=admin)
+    again = client.delete(f"/admin/keys/{key['id']}", headers=admin)
+    assert (deleted.status_code, again.status_code,
+            client.get("/v1/models", headers=_bearer(plaintext)).status_code) == (200, 404, 401)
 
 
 def test_keys_require_admin(client: TestClient, auth: dict[str, str]):
@@ -71,25 +69,32 @@ def test_legacy_and_admin_keys_still_work(client: TestClient, auth: dict[str, st
     assert names == [None, "admin", "legacy"]
 
 
-def test_request_logged(client: TestClient, admin: dict[str, str]):
-    key = client.post("/admin/keys", headers=admin, json={"name": "bob"}).json()
-    headers = {**_bearer(key["api_key"]), "cf-connecting-ip": "203.0.113.7"}
-    r = client.post("/v1/chat/completions", headers=headers, json={
-        "model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]})
-    assert r.status_code == 200
-
-    row = _requests(client, admin)[0]
+def _assert_request_identity(row: dict, key: dict) -> None:
     assert row["method"] == "POST"
     assert row["path"] == "/v1/chat/completions"
     assert row["model"] == "gpt-4o"
     assert row["key_id"] == key["key"]["id"]
     assert row["key_name"] == "bob"
     assert row["account_id"] == "anonymous"  # mock driver without accounts
+
+
+def _assert_request_outcome(row: dict) -> None:
     assert row["status_code"] == 200
     assert row["latency_ms"] >= 0
     assert row["client_ip"] == "203.0.113.7"
     assert row["stream"] is False
     assert row["error"] is None
+
+
+def test_request_logged(client: TestClient, admin: dict[str, str]):
+    key = client.post("/admin/keys", headers=admin, json={"name": "bob"}).json()
+    headers = {**_bearer(key["api_key"]), "cf-connecting-ip": "203.0.113.7"}
+    r = client.post("/v1/chat/completions", headers=headers, json={
+        "model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 200
+    row = _requests(client, admin)[0]
+    _assert_request_identity(row, key)
+    _assert_request_outcome(row)
 
 
 def test_stream_and_error_logged(client: TestClient, auth: dict[str, str], admin: dict[str, str]):
@@ -125,6 +130,11 @@ def test_polls_flagged_and_media_skipped(client: TestClient, auth: dict[str, str
     assert [r["path"] for r in _requests(client, admin, hide_polls="true")] == ["/v1/videos"]
 
 
+def _assert_group_shapes(s: dict) -> None:
+    for group in ("by_key", "by_account", "by_model", "by_status"):
+        assert isinstance(s[group], list)
+
+
 def test_stats_shape(client: TestClient, auth: dict[str, str], admin: dict[str, str]):
     client.get("/v1/models", headers=auth)
     client.get("/v1/models")  # 401
@@ -132,11 +142,9 @@ def test_stats_shape(client: TestClient, auth: dict[str, str], admin: dict[str, 
     assert r.status_code == 200
     s = r.json()
     assert s["window"] == "1h"
-    assert s["total"] == 2 and s["errors"] == 1
-    assert s["error_rate"] == 0.5
+    assert (s["total"], s["errors"], s["error_rate"]) == (2, 1, 0.5)
     assert set(s["latency_ms"]) == {"p50", "p95"}
-    for group in ("by_key", "by_account", "by_model", "by_status"):
-        assert isinstance(s[group], list)
+    _assert_group_shapes(s)
     assert {g["status_code"] for g in s["by_status"]} == {200, 401}
     assert len(s["series"]) >= 59
     assert sum(p["count"] for p in s["series"]) == 2
@@ -241,6 +249,19 @@ def _wait_task(client: TestClient, auth: dict[str, str], task_id: str):
     raise AssertionError(f"task {task_id} did not finish")
 
 
+def _poll_task_rows(client: TestClient, admin: dict[str, str]) -> dict[str, dict]:
+    """Wait until every submit row carries a task outcome, then return by task_id."""
+    import time
+
+    rows: dict[str, dict] = {}
+    for _ in range(100):
+        rows = {r["task_id"]: r for r in _requests(client, admin, hide_polls="true")}
+        if all(r["task_status"] for r in rows.values()):
+            break
+        time.sleep(0.01)
+    return rows
+
+
 def test_failed_task_counts_as_error(client: TestClient, auth: dict[str, str], admin: dict[str, str], monkeypatch: pytest.MonkeyPatch):
     from muse2api.drivers.mock import MockDriver
     from muse2api.errors import UpstreamTimeout
@@ -255,28 +276,19 @@ def test_failed_task_counts_as_error(client: TestClient, auth: dict[str, str], a
     bad = client.post("/v1/videos", headers=auth, json={"prompt": "a wave"}).json()
     _wait_task(client, auth, bad["id"])
 
-    import time
-
-    # The outcome is written just after the task flips to failed, so allow a beat.
-    for _ in range(100):
-        rows = {r["task_id"]: r for r in _requests(client, admin, hide_polls="true")}
-        if all(r["task_status"] for r in rows.values()):
-            break
-        time.sleep(0.01)
+    rows = _poll_task_rows(client, admin)
     # Both submits answered 200; only the task outcome tells them apart.
-    assert rows[ok["id"]]["status_code"] == rows[bad["id"]]["status_code"] == 200  # type: ignore[possibly-unbound]
-    assert rows[ok["id"]]["task_status"] == "succeeded"  # type: ignore[possibly-unbound]
-    assert rows[bad["id"]]["task_status"] == "failed"  # type: ignore[possibly-unbound]
-    assert rows[bad["id"]]["error"] == "video generation timed out"  # type: ignore[possibly-unbound]
-    assert rows[bad["id"]]["task_ms"] >= 0  # type: ignore[possibly-unbound]
+    assert rows[ok["id"]]["status_code"] == rows[bad["id"]]["status_code"] == 200
+    assert (rows[ok["id"]]["task_status"], rows[bad["id"]]["task_status"]) == ("succeeded", "failed")
+    assert rows[bad["id"]]["error"] == "video generation timed out"
+    assert rows[bad["id"]]["task_ms"] >= 0
     assert [r["task_id"] for r in _requests(client, admin, status="failed")] == [bad["id"]]
 
     s = client.get("/admin/stats", headers=admin, params={"window": "1h"}).json()
-    assert s["total"] == 2 and s["errors"] == 1 and s["server_errors"] == 0
-    assert sum(p["count"] for p in s["series"]) == 2
-    assert sum(p["errors"] for p in s["series"]) == 1
+    assert (s["total"], s["errors"], s["server_errors"]) == (2, 1, 0)
+    assert (sum(p["count"] for p in s["series"]), sum(p["errors"] for p in s["series"])) == (2, 1)
     usage = client.get("/admin/keys", headers=admin).json()["builtin"][0]["usage"]
-    assert usage["requests_24h"] == 2 and usage["errors_24h"] == 1
+    assert (usage["requests_24h"], usage["errors_24h"]) == (2, 1)
 
 
 async def test_task_outcome_before_row_and_backfill(settings: Settings):

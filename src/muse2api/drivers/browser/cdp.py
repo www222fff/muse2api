@@ -46,11 +46,16 @@ class CDPSession:
         else:
             fut.set_result(msg.get("result", {}))
     def _dispatch_event(self, method: str, msg: dict[str, Any]) -> None:
+        params = msg.get("params", {})
         for cb in self._listeners.get(method, ()):
-            try:
-                cb(msg.get("params", {}))
-            except Exception:
-                log.exception("cdp listener for %s failed", method)
+            self._safe_callback(cb, method, params)
+
+    def _safe_callback(self, cb: Callable[[dict[str, Any]], None],
+                       method: str, params: dict[str, Any]) -> None:
+        try:
+            cb(params)
+        except Exception:
+            log.exception("cdp listener for %s failed", method)
 
     async def _read_loop(self) -> None:
         try:
@@ -60,7 +65,7 @@ class CDPSession:
                     self._resolve_pending(msg)
                 elif method := msg.get("method"):
                     self._dispatch_event(method, msg)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - reader exit is logged and finalised below
             log.debug("cdp reader stopped: %s", exc)
         finally:
             for fut in self._pending.values():
@@ -74,7 +79,8 @@ class CDPSession:
     async def send(self, method: str, params: dict[str, Any] | None = None,
                    timeout: float = 30.0) -> dict[str, Any]:
         if self.closed:
-            raise CDPError("cdp connection closed")
+            message = "cdp connection closed"
+            raise CDPError(message)
         msg_id = next(self._ids)
         fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending[msg_id] = fut

@@ -176,7 +176,10 @@ async def test_text_only_reply_asks_for_the_file_once(driver, fast, monkeypatch)
 
     monkeypatch.setattr(driver, "_send", send)
     tab = _media_tab([{**DONE, "agentCount": 0}, DONE, DONE])
-    att = await driver._wait_media(tab, {"agentCount": 0, "attachments": []}, "image", 30, None, None)
+    att = await driver._wait_media(
+        tab, {"agentCount": 0, "attachments": []}, "image", 30,
+        on_progress=None, cancel=None,
+    )
     assert att == IMG
     assert len(sent) == 1 and "attach the final image" in sent[0]
 
@@ -193,7 +196,10 @@ async def test_still_text_only_after_asking_is_refused(driver, fast, monkeypatch
     monkeypatch.setattr(driver, "_send", send)
     tab = _media_tab([DONE])
     with pytest.raises(UpstreamRefused):
-        await driver._wait_media(tab, {"agentCount": 0, "attachments": []}, "image", 30, None, None)
+        await driver._wait_media(
+            tab, {"agentCount": 0, "attachments": []}, "image", 30,
+            on_progress=None, cancel=None,
+        )
     assert len(sent) == 1
 
 
@@ -201,7 +207,10 @@ async def test_timeout_is_soft_while_still_generating(driver, fast):
     busy = {"agentCount": 0, "lastText": "", "generating": True, "attachments": []}
     tab = _media_tab([busy])
     task = asyncio.create_task(
-        driver._wait_media(tab, {"agentCount": 0, "attachments": []}, "image", 0.05, None, None))
+        driver._wait_media(
+            tab, {"agentCount": 0, "attachments": []}, "image", 0.05,
+            on_progress=None, cancel=None,
+        ))
     await asyncio.sleep(0.1)  # past the timeout, but the stop button is still shown
     assert not task.done()
     tab.session.states[:] = [{**busy, "generating": False, "agentCount": 1, "attachments": [IMG]}]  # type: ignore[attr-defined]
@@ -427,7 +436,7 @@ async def test_media_leaves_a_warm_tab_alone(driver, monkeypatch):
 
     monkeypatch.setattr(driver, "_prepare", prepare)
     with pytest.raises(RuntimeError):
-        await driver._generate(ACC, "a cat", [], "image", 1, None, None)
+        await driver._generate(ACC, "a cat", [], "image", 1, on_progress=None, cancel=None)
     assert taken and taken[0] is not warm and warm.warm
 
 

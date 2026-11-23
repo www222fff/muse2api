@@ -58,14 +58,14 @@ async def _build_chat_request(request: Request, body: ChatCompletionRequest,
     return req, cancel
 
 
-def _completion_payload(completion_id: str, created: int, model_name: str,
-                        text: str, prompt_text: str) -> dict[str, Any]:
+def _completion_payload(ids: _CompletionIds, text: str,
+                        prompt_text: str) -> dict[str, Any]:
     """Assemble the non-streaming chat completion response."""
     return {
-        "id": completion_id,
+        "id": ids.completion_id,
         "object": "chat.completion",
-        "created": created,
-        "model": model_name,
+        "created": ids.created,
+        "model": ids.model_name,
         "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
                      "finish_reason": "stop"}],
         "usage": _usage(prompt_text, text),
@@ -78,15 +78,15 @@ def _usage(prompt_text: str, completion_text: str) -> dict[str, Any]:
     return {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct}
 
 
-def _tool_calls_payload(completion_id: str, created: int, model_name: str,
-                        text: str, tool_calls: list[dict[str, Any]],
+def _tool_calls_payload(ids: _CompletionIds, text: str,
+                        tool_calls: list[dict[str, Any]],
                         prompt_text: str) -> dict[str, Any]:
     """Assemble a non-streaming completion that ends in tool calls."""
     return {
-        "id": completion_id,
+        "id": ids.completion_id,
         "object": "chat.completion",
-        "created": created,
-        "model": model_name,
+        "created": ids.created,
+        "model": ids.model_name,
         "choices": [{
             "index": 0,
             "message": {
@@ -221,24 +221,23 @@ def _last_user_query_from_body(body: ChatCompletionRequest) -> str:
 
 
 async def _non_streaming(stream: AsyncIterator[str], body: ChatCompletionRequest,
-                         flat: FlatPrompt, completion_id: str,
-                         created: int, model_name: str) -> dict[str, Any]:
+                         flat: FlatPrompt, ids: _CompletionIds) -> dict[str, Any]:
     """Non-streaming completion, with optional tool-call reconstruction."""
     text = "".join([d async for d in stream])
     user_q = _last_user_query_from_body(body)
     if body.tools:
         tool_calls, remaining = extract_tool_calls(
-            text, _available_tool_names(body), user_query=user_q
+            text, _available_tool_names(body), user_query=user_q,
         )
         if tool_calls:
-            return _tool_calls_payload(completion_id, created, model_name,
-                                       sanitize_response_text(remaining or ""), tool_calls, flat.text)
+            return _tool_calls_payload(ids, sanitize_response_text(remaining or ""),
+                                       tool_calls, flat.text)
     clean_text = sanitize_response_text(text)
     if is_refusal(text):
-        syn = synthesize_tool_response([m.model_dump() for m in body.messages], user_q)
+        syn = synthesize_tool_response([m.model_dump() for m in body.messages])
         if syn:
             clean_text = syn
-    return _completion_payload(completion_id, created, model_name, clean_text, flat.text)
+    return _completion_payload(ids, clean_text, flat.text)
 
 
 @router.post("/v1/chat/completions", response_model=None)
@@ -253,7 +252,8 @@ async def chat_completions(body: ChatCompletionRequest, request: Request,
              body.stream, tool_names, user_q, len(body.messages))
     flat = flatten_messages([m.model_dump() for m in body.messages], tools=body.tools)
     if not flat.text and not flat.images:
-        raise InvalidRequest("messages contain no text or images")
+        message = "messages contain no text or images"
+        raise InvalidRequest(message)
 
     req, cancel = await _build_chat_request(request, body, svc, flat)
     completion_id = "chatcmpl-" + uuid.uuid4().hex[:24]
@@ -261,12 +261,11 @@ async def chat_completions(body: ChatCompletionRequest, request: Request,
     model_name = body.model or spec.id
     stream = svc.gateway.chat_stream(req)
 
+    ids = _CompletionIds(completion_id, created, model_name)
     if not body.stream:
-        return await _non_streaming(stream, body, flat, completion_id, created, model_name)
+        return await _non_streaming(stream, body, flat, ids)
 
-    return await _streaming(
-        stream, svc, body, flat, _CompletionIds(completion_id, created, model_name), cancel
-    )
+    return await _streaming(stream, _StreamCtx(svc, body, flat, ids, cancel))
 
 
 @dataclass(frozen=True)
@@ -277,86 +276,104 @@ class _CompletionIds:
     model_name: str
 
 
-async def _streaming(stream: AsyncIterator[str], svc: Services, body: ChatCompletionRequest,
-                     flat: FlatPrompt, ids: _CompletionIds, cancel: asyncio.Event) -> StreamingResponse:
-    """Build the streaming SSE response (with or without first-delta pre-fetch)."""
-    completion_id, created, model_name = ids.completion_id, ids.created, ids.model_name
-    available_tool_names = _available_tool_names(body)
+@dataclass(frozen=True)
+class _StreamCtx:
+    """Bundle passed to the streaming SSE builders."""
+    svc: Services
+    body: ChatCompletionRequest
+    flat: FlatPrompt
+    ids: _CompletionIds
+    cancel: asyncio.Event
 
-    def chunk(delta: dict[str, Any], finish: str | None = None) -> dict[str, Any]:
-        return {
-            "id": completion_id, "object": "chat.completion.chunk", "created": created,
-            "model": model_name,
-            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
-        }
 
-    async def _stream_tools(first: str) -> AsyncIterator[bytes]:
-        """Streamed chat with tool extraction (full output is buffered)."""
-        produced = first or ""
-        async for delta in stream:
-            produced += delta
-        user_q = _last_user_query_from_body(body)
-        log.info("_stream_tools: produced len=%d, user_q=%r, text_preview=%r",
-                 len(produced), user_q, produced[:100])
-        tool_calls, remaining = extract_tool_calls(
-            produced, available_tool_names, user_query=user_q
-        )
-        if tool_calls:
-            clean_remaining = sanitize_response_text(remaining or "")
-            yield _tool_calls_chunk(completion_id, created, model_name, clean_remaining, tool_calls)
-            yield _tool_calls_finish(completion_id, created, model_name)
+def _chunk(ids: _CompletionIds, delta: dict[str, Any],
+           finish: str | None = None) -> dict[str, Any]:
+    return {
+        "id": ids.completion_id, "object": "chat.completion.chunk",
+        "created": ids.created, "model": ids.model_name,
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+    }
+
+
+async def _stream_tools(stream: AsyncIterator[str], ctx: _StreamCtx,
+                        first: str) -> AsyncIterator[bytes]:
+    """Streamed chat with tool extraction (full output is buffered)."""
+    produced = first or ""
+    async for delta in stream:
+        produced += delta
+    user_q = _last_user_query_from_body(ctx.body)
+    log.info("_stream_tools: produced len=%d, user_q=%r, text_preview=%r",
+             len(produced), user_q, produced[:100])
+    tool_calls, remaining = extract_tool_calls(
+        produced, _available_tool_names(ctx.body), user_query=user_q,
+    )
+    if tool_calls:
+        clean_remaining = sanitize_response_text(remaining or "")
+        yield _tool_calls_chunk(ctx.ids.completion_id, ctx.ids.created, ctx.ids.model_name,
+                                clean_remaining, tool_calls)
+        yield _tool_calls_finish(ctx.ids.completion_id, ctx.ids.created, ctx.ids.model_name)
+    else:
+        clean_text = sanitize_response_text(produced)
+        if is_refusal(produced):
+            syn = synthesize_tool_response([m.model_dump() for m in ctx.body.messages])
+            if syn:
+                clean_text = syn
+        yield _sse(_chunk(ctx.ids, {"role": "assistant", "content": clean_text}))
+        yield _sse(_chunk(ctx.ids, {}, "stop"))
+    if (ctx.body.stream_options or {}).get("include_usage"):
+        yield _usage_chunk(ctx.ids.completion_id, ctx.ids.created, ctx.ids.model_name,
+                           ctx.flat.text, produced)
+
+
+async def _stream_plain(stream: AsyncIterator[str], ctx: _StreamCtx,
+                        first: str) -> AsyncIterator[bytes]:
+    """Streamed chat without tool extraction (deltas are forwarded)."""
+    produced = first or ""
+    yield _sse(_chunk(ctx.ids, {"role": "assistant", "content": produced}))
+    async for delta in stream:
+        produced += delta
+        yield _sse(_chunk(ctx.ids, {"content": delta}))
+    yield _sse(_chunk(ctx.ids, {}, "stop"))
+    if (ctx.body.stream_options or {}).get("include_usage"):
+        yield _usage_chunk(ctx.ids.completion_id, ctx.ids.created, ctx.ids.model_name,
+                           ctx.flat.text, produced)
+
+
+async def _stream_events(stream: AsyncIterator[str], ctx: _StreamCtx,
+                         first: str | None) -> AsyncIterator[bytes]:
+    # ``first`` is the pre-fetched first delta when heartbeats are disabled;
+    # when enabled it is None and the first token is awaited here, after the
+    # 200 (headers) has already been committed to the client.
+    try:
+        if first is None:
+            first, heartbeats = await _collect_first(stream, ctx.svc)
+            for beat in heartbeats:
+                yield beat
+        if ctx.body.tools:
+            async for ev in _stream_tools(stream, ctx, first):
+                yield ev
         else:
-            clean_text = sanitize_response_text(produced)
-            if is_refusal(produced):
-                syn = synthesize_tool_response([m.model_dump() for m in body.messages], user_q)
-                if syn:
-                    clean_text = syn
-            yield _sse(chunk({"role": "assistant", "content": clean_text}))
-            yield _sse(chunk({}, "stop"))
-        if (body.stream_options or {}).get("include_usage"):
-            yield _usage_chunk(completion_id, created, model_name, flat.text, produced)
+            async for ev in _stream_plain(stream, ctx, first):
+                yield ev
+    except Muse2APIError as exc:
+        yield _sse(exc.to_body())
+    except Exception:
+        log.exception("stream crashed")
+        yield _sse({"error": {"message": "internal error", "type": "server_error"}})
+    finally:
+        ctx.cancel.set()
+        await stream.aclose()  # type: ignore[attr-defined]  # upstream stream is an async generator
+    yield _sse("[DONE]")
 
-    async def _stream_plain(first: str) -> AsyncIterator[bytes]:
-        """Streamed chat without tool extraction (deltas are forwarded)."""
-        produced = first or ""
-        yield _sse(chunk({"role": "assistant", "content": produced}))
-        async for delta in stream:
-            produced += delta
-            yield _sse(chunk({"content": delta}))
-        yield _sse(chunk({}, "stop"))
-        if (body.stream_options or {}).get("include_usage"):
-            yield _usage_chunk(completion_id, created, model_name, flat.text, produced)
 
-    async def events(first: str | None) -> AsyncIterator[bytes]:
-        # ``first`` is the pre-fetched first delta when heartbeats are disabled;
-        # when enabled it is None and the first token is awaited here, after the
-        # 200 (headers) has already been committed to the client.
-        try:
-            if first is None:
-                first, heartbeats = await _collect_first(stream, svc)
-                for beat in heartbeats:
-                    yield beat
-            if body.tools:
-                async for ev in _stream_tools(first):
-                    yield ev
-            else:
-                async for ev in _stream_plain(first):
-                    yield ev
-        except Muse2APIError as exc:
-            yield _sse(exc.to_body())
-        except Exception:
-            log.exception("stream crashed")
-            yield _sse({"error": {"message": "internal error", "type": "server_error"}})
-        finally:
-            cancel.set()
-            await stream.aclose()  # type: ignore[attr-defined]  # upstream stream is an async generator
-        yield _sse("[DONE]")
-
+async def _streaming(stream: AsyncIterator[str], ctx: _StreamCtx) -> StreamingResponse:
+    """Build the streaming SSE response (with or without first-delta pre-fetch)."""
     # With stream_heartbeat_interval set (C4), the 200 goes out immediately and
     # ': keepalive' SSE comments are sent while the first token is pending;
     # upstream errors then surface as SSE error events instead of HTTP codes.
-    if svc.settings.stream_heartbeat_interval > 0:
-        return StreamingResponse(events(None), media_type="text/event-stream",
+    if ctx.svc.settings.stream_heartbeat_interval > 0:
+        return StreamingResponse(_stream_events(stream, ctx, None),
+                                 media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache",
                                           "X-Accel-Buffering": "no"})
 
@@ -368,5 +385,7 @@ async def _streaming(stream: AsyncIterator[str], svc: Services, body: ChatComple
     except StopAsyncIteration:
         first = ""
 
-    return StreamingResponse(events(first), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return StreamingResponse(_stream_events(stream, ctx, first),
+                             media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})

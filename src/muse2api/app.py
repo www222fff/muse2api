@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import time
+import types
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager
 from functools import wraps
@@ -65,7 +66,8 @@ class _AsyncContextManager(AbstractAsyncContextManager[_T]):
         return await self._agen.__anext__()
 
     async def __aexit__(self, typ: type[BaseException] | None,
-                        value: BaseException | None, traceback: Any) -> bool:
+                        value: BaseException | None,
+                        traceback: types.TracebackType | None) -> bool:
         if self._agen is None:
             return False
         try:
@@ -98,7 +100,7 @@ def create_app(settings: Settings | None = None, driver: MuseDriver | None = Non
     services = Services.build(settings, driver)
 
     @_asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await services.pool.load()
         await services.tasks.load()
         await services.keys.load()
@@ -113,7 +115,7 @@ def create_app(settings: Settings | None = None, driver: MuseDriver | None = Non
         keepalive = None
         if settings.keepalive_enabled and services.driver.capabilities.renew_session:
             keepalive = asyncio.create_task(
-                keepalive_loop(services.pool, services.driver, settings.keepalive_interval)
+                keepalive_loop(services.pool, services.driver, settings.keepalive_interval),
             )
         log.info("muse2api %s ready (driver=%s)", __version__, services.driver.name)
         try:

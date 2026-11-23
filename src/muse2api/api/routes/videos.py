@@ -60,6 +60,7 @@ async def get_video(task_id: str, request: Request,
                     svc: Annotated[Services, Depends(get_services)]) -> dict[str, Any]:
     task = svc.tasks.get(task_id)
     if task is None or task.kind != "video":
-        raise NotFound(f"video task '{task_id}' not found")
+        message = f"video task '{task_id}' not found"
+        raise NotFound(message)
     request.state.model = task.request.get("model")
     return _task_view(task)

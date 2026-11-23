@@ -119,9 +119,11 @@ async def renew_session(
     async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
         resp = await client.get(SESSION_API, headers={"Cookie": cookie_header(jar)})
         if resp.status_code in (401, 403):
-            raise UpstreamAuthError(f"session rejected by upstream (HTTP {resp.status_code})")
+            message = f"session rejected by upstream (HTTP {resp.status_code})"
+            raise UpstreamAuthError(message)
         if resp.status_code >= 400:
-            raise UpstreamError(f"session endpoint returned HTTP {resp.status_code}")
+            message = f"session endpoint returned HTTP {resp.status_code}"
+            raise UpstreamError(message)
 
         _merge_cookies(resp, jar, expires)
         body = _json_body(resp)

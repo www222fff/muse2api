@@ -518,11 +518,36 @@ def display_models(current_model: str = ""):
         _print_model_footer(w)
 
 
+def _git_args(prompt: str) -> list[str]:
+    """Command arguments: everything after ``git``, defaulting to ``status``."""
+    cmd_args = prompt.strip().split()
+    return cmd_args[1:] if len(cmd_args) > 1 else ["status"]
+
+
+def _print_git_rich(args: list[str], output: str, returncode: int) -> None:
+    console.print(
+        Panel(
+            output.strip(),
+            title=(
+                "[bold blue]⚡ Git: git "
+                f"{' '.join(args)} (Exit: {returncode})[/bold blue]"
+            ),
+            border_style="blue",
+        )
+    )
+
+
+def _print_git_plain(args: list[str], output: str, returncode: int) -> None:
+    print(f"\n{BOLD}{C_BLUE}┌── ⚡ GIT EXECUTION: git {' '.join(args)} ──{RST}")
+    for line in output.splitlines():
+        print(f"{C_WHITE}{line}{RST}")
+    print(f"{BOLD}{C_BLUE}└── [Exit code: {returncode}]{RST}\n")
+
+
 def _handle_git(prompt: str) -> None:
     """Execute git commands in the active workspace and format output."""
     ws = get_default_workspace()
-    cmd_args = prompt.strip().split()
-    args = cmd_args[1:] if len(cmd_args) > 1 else ["status"]
+    args = _git_args(prompt)
 
     try:
         res = subprocess.run(
@@ -534,21 +559,9 @@ def _handle_git(prompt: str) -> None:
         )
         output = res.stdout or res.stderr or "No output."
         if HAVE_RICH and console:
-            console.print(
-                Panel(
-                    output.strip(),
-                    title=(
-                        "[bold blue]⚡ Git: git "
-                        f"{' '.join(args)} (Exit: {res.returncode})[/bold blue]"
-                    ),
-                    border_style="blue",
-                )
-            )
+            _print_git_rich(args, output, res.returncode)
         else:
-            print(f"\n{BOLD}{C_BLUE}┌── ⚡ GIT EXECUTION: git {' '.join(args)} ──{RST}")
-            for line in output.splitlines():
-                print(f"{C_WHITE}{line}{RST}")
-            print(f"{BOLD}{C_BLUE}└── [Exit code: {res.returncode}]{RST}\n")
+            _print_git_plain(args, output, res.returncode)
     except Exception as e:
         if HAVE_RICH and console:
             console.print(f"[bold red]Error running git: {e}[/bold red]")

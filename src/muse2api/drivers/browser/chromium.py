@@ -26,16 +26,15 @@ _CANDIDATES = (
 
 def find_chromium(configured: str = "") -> str:
     for c in ((configured,) if configured else ()) + _CANDIDATES:
-        if c and (os.path.isfile(c) or shutil.which(c)):
+        if c and (Path(c).is_file() or shutil.which(c)):
             return c
-    raise FileNotFoundError(
-        "Chromium/Chrome not found; install it or set MUSE2API_CHROMIUM_PATH"
-    )
+    message = "Chromium/Chrome not found; install it or set MUSE2API_CHROMIUM_PATH"
+    raise FileNotFoundError(message)
 
 
 class ChromiumProcess:
-    def __init__(self, executable: str, port: int, profile_dir: Path, headless: bool = True,
-                 proxy: str = ""):
+    def __init__(self, executable: str, port: int, profile_dir: Path, *,
+                 headless: bool = True, proxy: str = ""):
         self.executable = executable
         self.port = port
         self.profile_dir = profile_dir
@@ -56,17 +55,8 @@ class ChromiumProcess:
         except (httpx.HTTPError, ValueError):
             return None
 
-    async def start(self) -> str:
-        """Start (or attach to an already running) Chromium; return the browser ws URL."""
-        if url := await self.browser_ws_url():
-            log.info("attached to existing Chromium on port %s", self.port)
-            return url
-
-        self.profile_dir.mkdir(parents=True, exist_ok=True)
-        for lock in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
-            with contextlib.suppress(FileNotFoundError):
-                (self.profile_dir / lock).unlink()
-
+    def _chrome_args(self) -> list[str]:
+        """Command-line arguments for the Chromium process."""
         args = [
             self.executable,
             f"--remote-debugging-port={self.port}",
@@ -86,10 +76,24 @@ class ChromiumProcess:
             args[1:1] = ["--headless=new", "--disable-gpu"]
         if hasattr(os, "geteuid") and os.geteuid() == 0:
             args.insert(1, "--no-sandbox")
+        return args
 
+    def _clear_profile_locks(self) -> None:
+        for lock in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+            with contextlib.suppress(FileNotFoundError):
+                (self.profile_dir / lock).unlink()
+
+    async def start(self) -> str:
+        """Start (or attach to an already running) Chromium; return the browser ws URL."""
+        if url := await self.browser_ws_url():
+            log.info("attached to existing Chromium on port %s", self.port)
+            return url
+
+        self.profile_dir.mkdir(parents=True, exist_ok=True)
+        self._clear_profile_locks()
         log.info("launching Chromium: %s", self.executable)
         self.proc = await asyncio.create_subprocess_exec(
-            *args,
+            *self._chrome_args(),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
@@ -99,10 +103,12 @@ class ChromiumProcess:
                 return url
             if self.proc.returncode is not None:
                 _, stderr = await self.proc.communicate()
-                log.error("Chromium exited prematurely with code %s: %s", self.proc.returncode, stderr.decode(errors="replace"))
+                log.error("Chromium exited prematurely with code %s: %s",
+                          self.proc.returncode, stderr.decode(errors="replace"))
                 break
             await asyncio.sleep(0.5)
-        raise RuntimeError("Chromium did not expose a DevTools endpoint")
+        message = "Chromium did not expose a DevTools endpoint"
+        raise RuntimeError(message)
 
     async def stop(self) -> None:
         if self.proc and self.proc.returncode is None:

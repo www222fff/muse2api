@@ -51,7 +51,7 @@ class MockDriver(MuseDriver):
     def __init__(self, delay: float = 0.01) -> None:
         self.delay = delay
 
-    async def chat_stream(self, account: Account, req: ChatRequest) -> AsyncIterator[str]:
+    async def chat_stream(self, account: Account, req: ChatRequest) -> AsyncIterator[str]:  # noqa: ARG002
         reply = f"[mock:{req.model}] You said: {req.prompt[-200:]}"
         if req.images:
             reply += f" (with {len(req.images)} image(s))"
@@ -61,7 +61,7 @@ class MockDriver(MuseDriver):
             await asyncio.sleep(self.delay)
             yield reply[i : i + 8]
 
-    async def generate_image(self, account: Account, req: ImageRequest) -> list[MediaResult]:
+    async def generate_image(self, account: Account, req: ImageRequest) -> list[MediaResult]:  # noqa: ARG002
         results: list[MediaResult] = []
         for i in range(max(1, req.n)):
             if req.on_progress:
@@ -76,11 +76,11 @@ class MockDriver(MuseDriver):
                     width=64,
                     height=64,
                     revised_prompt=req.prompt,
-                )
+                ),
             )
         return results
 
-    async def generate_video(self, account: Account, req: VideoRequest) -> MediaResult:
+    async def generate_video(self, account: Account, req: VideoRequest) -> MediaResult:  # noqa: ARG002
         for p in (10, 40, 70, 100):
             await asyncio.sleep(self.delay)
             if req.on_progress:
@@ -88,10 +88,10 @@ class MockDriver(MuseDriver):
         # Not a playable video; placeholder bytes with the right mime for plumbing tests.
         return MediaResult(data=b"\x00\x00\x00\x18ftypmp42mock", mime="video/mp4", kind="video")
 
-    async def renew_session(self, account: Account) -> SessionInfo:
+    async def renew_session(self, account: Account) -> SessionInfo:  # noqa: ARG002
         return SessionInfo(ok=True, meta={"driver": "mock"})
 
-    async def quota(self, account: Account) -> dict[str, Any]:
+    async def quota(self, account: Account) -> dict[str, Any]:  # noqa: ARG002
         """Deterministic fake quota snapshot for plumbing tests and front-end work."""
         return {
             "plan": "free",

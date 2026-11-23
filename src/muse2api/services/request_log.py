@@ -61,6 +61,13 @@ CREATE INDEX IF NOT EXISTS idx_requests_task ON requests (task_id);
 # Columns added after the first release; created on open when missing.
 _ADDED_COLUMNS = {"task_status": "TEXT", "task_ms": "INTEGER"}
 
+# Row-insert SQL kept in sync with COLUMNS (static literal, no user input).
+_INSERT_SQL = (
+    "INSERT INTO requests (ts, method, path, model, key_id, key_name, account_id, "
+    "status_code, latency_ms, stream, poll, error, client_ip, user_agent, task_id) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+
 # A request failed if it got an HTTP error or its async task failed later.
 FAILED = "(status_code >= 400 OR task_status = 'failed')"
 
@@ -119,6 +126,7 @@ class RequestLog:
             have = {r[1] for r in conn.execute("PRAGMA table_info(requests)")}
             for col, kind in _ADDED_COLUMNS.items():
                 if col not in have:
+                    # col/kind come only from the fixed _ADDED_COLUMNS constant.
                     conn.execute(f"ALTER TABLE requests ADD COLUMN {col} {kind}")
             self._conn = conn
         return self._conn
@@ -129,7 +137,7 @@ class RequestLog:
 
     async def open(self) -> None:
         try:
-            await asyncio.to_thread(self._call, lambda db: None)
+            await asyncio.to_thread(self._call, lambda _db: None)
         except Exception:
             # Not fatal: the connection is retried on the next write.
             log.exception("failed to open request log %s", self.path)
@@ -147,11 +155,10 @@ class RequestLog:
     async def add(self, record: dict[str, Any]) -> None:
         record = {"stream": 0, "poll": 0, **record}
         row = tuple(record.get(c) for c in COLUMNS)
-        sql = f"INSERT INTO requests ({', '.join(COLUMNS)}) VALUES ({', '.join('?' * len(COLUMNS))})"
         task_id = None if record["poll"] else record.get("task_id")
 
         def run(db: sqlite3.Connection) -> None:
-            db.execute(sql, row)
+            db.execute(_INSERT_SQL, row)
             # Under the same lock as finish_task, so an outcome is never stashed
             # just after this row went in.
             if task_id and (early := self._early.pop(task_id, None)):
@@ -241,9 +248,10 @@ class RequestLog:
         cond = " AND ".join(where)
 
         def run(db: sqlite3.Connection) -> dict[str, Any]:
-            total = db.execute(f"SELECT COUNT(*) FROM requests WHERE {cond}", args).fetchone()[0]
+            # cond is assembled only from fixed fragments below with ? placeholders.
+            total = db.execute(f"SELECT COUNT(*) FROM requests WHERE {cond}", args).fetchone()[0]  # noqa: S608
             rows = db.execute(
-                f"SELECT * FROM requests WHERE {cond} ORDER BY id DESC LIMIT ? OFFSET ?",
+                f"SELECT * FROM requests WHERE {cond} ORDER BY id DESC LIMIT ? OFFSET ?",  # noqa: S608
                 [*args, f.limit, f.offset]).fetchall()
             return {"data": [_row(r) for r in rows], "total": total}
 
@@ -259,22 +267,23 @@ class RequestLog:
         cond, args = "ts >= ? AND poll = 0", (start,)
 
         def grouped(db: sqlite3.Connection, cols: str) -> list[dict[str, Any]]:
+            # cols comes only from fixed internal arguments; cond is whitelisted.
             rows = db.execute(
-                f"SELECT {cols}, COUNT(*) AS count, SUM({FAILED}) AS errors "
+                f"SELECT {cols}, COUNT(*) AS count, SUM({FAILED}) AS errors "  # noqa: S608
                 f"FROM requests WHERE {cond} GROUP BY {cols} ORDER BY count DESC LIMIT 50",
                 args).fetchall()
             return [dict(r) for r in rows]
 
         def run(db: sqlite3.Connection) -> dict[str, Any]:
             total, errors, server_errors = db.execute(
-                f"SELECT COUNT(*), COALESCE(SUM({FAILED}), 0), "
+                f"SELECT COUNT(*), COALESCE(SUM({FAILED}), 0), "  # noqa: S608
                 f"COALESCE(SUM(status_code >= 500), 0) FROM requests WHERE {cond}",
                 args).fetchone()
             latencies = [r[0] for r in db.execute(
-                f"SELECT latency_ms FROM requests WHERE {cond} ORDER BY latency_ms", args)]
+                f"SELECT latency_ms FROM requests WHERE {cond} ORDER BY latency_ms", args)]  # noqa: S608
             series = [{"t": start + i * bucket, "count": 0, "errors": 0} for i in range(n_buckets)]
             for idx, count, errs in db.execute(
-                    f"SELECT CAST((ts - ?) / ? AS INTEGER) AS b, COUNT(*), "
+                    f"SELECT CAST((ts - ?) / ? AS INTEGER) AS b, COUNT(*), "  # noqa: S608
                     f"SUM({FAILED}) FROM requests WHERE {cond} GROUP BY b",
                     (start, bucket, *args)):
                 if 0 <= idx < n_buckets:
@@ -307,7 +316,7 @@ class RequestLog:
             # A bare column next to MAX() takes its value from the max row in SQLite,
             # so key_name is the name used by the key's latest request.
             rows = db.execute(
-                "SELECT key_id, key_name, MAX(ts) AS last_request_at, COUNT(*) AS total, "
+                "SELECT key_id, key_name, MAX(ts) AS last_request_at, COUNT(*) AS total, "  # noqa: S608 - static column list
                 "COALESCE(SUM(ts >= ?), 0) AS requests_24h, "
                 f"COALESCE(SUM(ts >= ? AND {FAILED}), 0) AS errors_24h "
                 "FROM requests WHERE poll = 0 AND key_id IS NOT NULL "

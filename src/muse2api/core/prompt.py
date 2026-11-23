@@ -74,7 +74,7 @@ def _tool_call_text(tc: Any) -> str | None:
     args = fn_dict.get("arguments", "{}")
     if isinstance(args, dict):
         args = json.dumps(args, ensure_ascii=False)
-    return f"<tool_call>\n{{\"name\": \"{name}\", \"arguments\": {args}}}\n</tool_call>"
+    return f'<tool_call>\n{{"name": "{name}", "arguments": {args}}}\n</tool_call>'
 
 
 def _message_to_text(msg: dict[str, Any], images: list[str]) -> str:
@@ -160,7 +160,7 @@ def _render_blocks(turns: list[tuple[str, str]], tool_section: str,
         "Continue the conversation above as the Assistant. "
         "If tool execution results are present in [Tool Result] above, formulate a comprehensive "
         "summary of the tool results for the user. Do not repeat web-sandbox disclaimers. "
-        "If another tool call is needed, format it as specified. Output only the reply."
+        "If another tool call is needed, format it as specified. Output only the reply.",
     )
     return blocks
 

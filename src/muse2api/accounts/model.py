@@ -28,7 +28,7 @@ class Account(BaseModel):
 
     cookies: dict[str, str] = Field(default_factory=dict)
     cookie_expires: dict[str, int] = Field(
-        default_factory=dict, description="cookie name -> unix expiry seconds"
+        default_factory=dict, description="cookie name -> unix expiry seconds",
     )
 
     created_at: float = Field(default_factory=_now)
@@ -39,7 +39,7 @@ class Account(BaseModel):
     fail_count: int = 0
 
     meta: dict[str, Any] = Field(
-        default_factory=dict, description="Driver-specific data such as quota snapshots or vm ids"
+        default_factory=dict, description="Driver-specific data such as quota snapshots or vm ids",
     )
 
     def is_available(self, now: float | None = None) -> bool:

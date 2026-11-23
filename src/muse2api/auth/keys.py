@@ -123,12 +123,13 @@ class KeyStore:
     def _atomic_write(self, payload: str) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".keys.", suffix=".tmp")
+        tmp_path = Path(tmp)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(payload)
-            os.chmod(tmp, 0o600)
-            os.replace(tmp, self.path)
+            tmp_path.chmod(0o600)
+            tmp_path.replace(self.path)
         except BaseException:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
+            if tmp_path.exists():
+                tmp_path.unlink()
             raise

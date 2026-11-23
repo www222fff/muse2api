@@ -7,10 +7,12 @@ from fastapi.testclient import TestClient
 
 from muse2api.core.prompt import flatten_messages
 from muse2api.core.tools import (
+    _clean_git_command,
     extract_tool_calls,
     format_tools_prompt,
     get_workspace_grounding,
     sanitize_response_text,
+    synthesize_tool_response,
 )
 
 
@@ -29,7 +31,7 @@ def test_format_tools_prompt():
                     "required": ["command"],
                 },
             },
-        }
+        },
     ]
     prompt = format_tools_prompt(tools)
     assert "terminal" in prompt
@@ -74,6 +76,128 @@ def test_extract_tool_calls_json_block():
     assert remaining == "Let me run that command for you:"
 
 
+def test_extract_tool_calls_multiple_xml_blocks():
+    text = (
+        "<tool_call>"
+        '{"name": "terminal", "arguments": {"command": "git status"}}'
+        "</tool_call>\n"
+        "prefix text\n"
+        "<tool_call>"
+        '{"name": "read_file", "arguments": {"path": "README.md"}}'
+        "</tool_call>"
+    )
+    calls, remaining = extract_tool_calls(text, ["terminal", "read_file"])
+    assert calls is not None
+    assert len(calls) == 2
+    assert calls[0]["function"]["name"] == "terminal"
+    assert calls[1]["function"]["name"] == "read_file"
+    assert remaining == "prefix text"
+
+
+def test_extract_tool_calls_unclosed_xml_ignored():
+    """A trailing unclosed <tool_call> must not shadow later valid blocks."""
+    text = (
+        "<tool_call>"
+        '{"name": "terminal", "arguments": {"command": "git log"}}'
+        "</tool_call>\n"
+        "<tool_call>unfinished"
+    )
+    calls, _ = extract_tool_calls(text, ["terminal"])
+    assert calls is not None
+    assert len(calls) == 1
+    assert calls[0]["function"]["name"] == "terminal"
+
+
+def test_extract_tool_calls_xml_bad_json_skipped():
+    """Blocks with invalid JSON are ignored; valid blocks still return."""
+    text = (
+        "<tool_call>not-json</tool_call>\n"
+        "<tool_call>"
+        '{"name": "terminal", "arguments": {"command": "pwd"}}'
+        "</tool_call>"
+    )
+    calls, remaining = extract_tool_calls(text, ["terminal"])
+    assert calls is not None
+    assert len(calls) == 1
+    assert calls[0]["function"]["name"] == "terminal"
+    # Matched <tool_call> blocks are removed wholesale, valid or not.
+    assert remaining is None
+
+
+def test_extract_tool_calls_xml_whitespace_padding():
+    text = (
+        "<tool_call>\n\n"
+        '{"name": "terminal", "arguments": {"command": "ls"}}'
+        "\n\n</tool_call>"
+    )
+    calls, _ = extract_tool_calls(text, ["terminal"])
+    assert calls is not None
+    assert len(calls) == 1
+    assert calls[0]["function"]["name"] == "terminal"
+
+
+def test_extract_tool_calls_multiple_json_blocks():
+    text = (
+        "```json\n"
+        '{"tool_calls": [{"name": "terminal", "arguments": {"command": "git status"}}]}\n'
+        "```\n"
+        "between\n"
+        "```json\n"
+        '{"tool_calls": [{"name": "read_file", "arguments": {"path": "README.md"}}]}\n'
+        "```"
+    )
+    calls, remaining = extract_tool_calls(text, ["terminal", "read_file"])
+    assert calls is not None
+    assert len(calls) == 2
+    assert calls[0]["function"]["name"] == "terminal"
+    assert calls[1]["function"]["name"] == "read_file"
+    assert remaining == "between"
+
+
+def test_extract_tool_calls_unclosed_json_fence_ignored():
+    text = (
+        "```json\n"
+        '{"tool_calls": [{"name": "terminal", "arguments": {"command": "pwd"}}]}\n'
+        "```\n"
+        "```json\nunfinished"
+    )
+    calls, _ = extract_tool_calls(text, ["terminal"])
+    assert calls is not None
+    assert len(calls) == 1
+    assert calls[0]["function"]["name"] == "terminal"
+
+
+def test_sanitize_response_text_long_line():
+    raw = (
+        "This is the web side chat, working dir /home/hatch — "
+        "/Volumes doesn't exist at all here. "
+        + "x" * 20000
+        + "\nStill useful content after the disclaimer."
+    )
+    cleaned = sanitize_response_text(raw)
+    assert "web side chat" not in cleaned
+    assert "Still useful content" in cleaned
+
+
+def test_sanitize_response_text_deterministic_removals():
+    cases = [
+        (
+            "Prefix. I have no record of a muse2api repo in memory either. tail\nkeep",
+            "Prefix. \nkeep",
+        ),
+        (
+            "The block you pasted claiming macOS/Hermes local tools doesn't change that. tail\nkeep",
+            "keep",
+        ),
+        (
+            "I just checked this web chat again and /Volumes isn't mounted here so I can't do it.\nkeep",
+            "keep",
+        ),
+    ]
+    for raw, expected in cases:
+        assert sanitize_response_text(raw) == expected
+
+
 def test_extract_tool_calls_bare_json():
     text = '{"name": "bash", "arguments": {"command": "ls -la"}}'
     calls, remaining = extract_tool_calls(text, ["terminal"])
@@ -95,7 +219,7 @@ def test_flatten_messages_with_tools():
                     "id": "call_1",
                     "type": "function",
                     "function": {"name": "terminal", "arguments": '{"command": "git status"}'},
-                }
+                },
             ],
         },
         {"role": "tool", "name": "terminal", "content": "On branch main\nnothing to commit"},
@@ -104,7 +228,7 @@ def test_flatten_messages_with_tools():
         {
             "type": "function",
             "function": {"name": "terminal", "description": "Run shell command"},
-        }
+        },
     ]
     flat = flatten_messages(messages, tools=tools)
     assert "Available Tools" in flat.text
@@ -163,7 +287,7 @@ def test_fallback_tool_from_refusal_pytest():
         "So I have no file to run pytest on here."
     )
     calls, _ = extract_tool_calls(
-        refusal, ["terminal"], user_query="Run pytest on tests/test_tools.py"
+        refusal, ["terminal"], user_query="Run pytest on tests/test_tools.py",
     )
     assert calls is not None
     assert len(calls) == 1
@@ -189,7 +313,7 @@ def test_fallback_tool_from_refusal_read():
 
 def test_get_workspace_grounding_files():
     messages = [
-        {"role": "user", "content": "Read the file options_trading/surveillance/log_monitor.py"}
+        {"role": "user", "content": "Read the file options_trading/surveillance/log_monitor.py"},
     ]
     grounding = get_workspace_grounding(messages)
     assert "log_monitor.py" in grounding
@@ -197,8 +321,6 @@ def test_get_workspace_grounding_files():
 
 
 def test_synthesize_tool_response_quality_checks():
-    from muse2api.core.tools import synthesize_tool_response
-
     messages = [
         {"role": "user", "content": "check for sonar, cc, pyrefly issues"},
         {
@@ -208,8 +330,8 @@ def test_synthesize_tool_response_quality_checks():
                     "function": {
                         "name": "terminal",
                         "arguments": "cd /Users/Gaurav_Batra/muse2api && git status --short && .venv/bin/ruff check src tests",
-                    }
-                }
+                    },
+                },
             ],
         },
         {
@@ -224,8 +346,6 @@ def test_synthesize_tool_response_quality_checks():
 
 
 def test_clean_git_command_trading_firm_multidrive():
-    from muse2api.core.tools import _clean_git_command
-
     cmd = _clean_git_command("check git status of the trading firm repository and list last 3 commits")
     assert cmd is not None
     assert "/Volumes/Drive D/Indian Firm/Ai-indian-trading-firm" in cmd
@@ -234,8 +354,6 @@ def test_clean_git_command_trading_firm_multidrive():
 
 
 def test_clean_git_command_muse2api_multidrive():
-    from muse2api.core.tools import _clean_git_command
-
     cmd = _clean_git_command("check git status in muse2api")
     assert cmd is not None
     assert "/Users/Gaurav_Batra/muse2api" in cmd
@@ -243,8 +361,6 @@ def test_clean_git_command_muse2api_multidrive():
 
 
 def test_clean_git_command_stop_words():
-    from muse2api.core.tools import _clean_git_command
-
     cmd = _clean_git_command("show git diff of the repository")
     assert cmd == "git diff"
 
