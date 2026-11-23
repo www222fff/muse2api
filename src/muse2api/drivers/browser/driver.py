@@ -418,6 +418,22 @@ class BrowserDriver(MuseDriver):
                     )
 
     @staticmethod
+    async def _read_cookies(session: CDPSession) -> tuple[dict[str, str], dict[str, int]]:
+        """muse.ai cookies of the tab's browser context: values, and expiries of the
+        ones that have one (session cookies report -1)."""
+        res = await session.send("Network.getCookies", {"urls": [f"{muse.SITE}/"]})
+        values: dict[str, str] = {}
+        expires: dict[str, int] = {}
+        for c in res.get("cookies") or []:
+            name, value = c.get("name"), c.get("value")
+            if not name or not value:
+                continue
+            values[name] = value
+            if (exp := c.get("expires") or -1) > 0:
+                expires[name] = int(exp)
+        return values, expires
+
+    @staticmethod
     async def _set_cookies(session: CDPSession, account: Account) -> None:
         floor = time.time() + 3600
         for name, value in account.cookies.items():
@@ -1299,18 +1315,45 @@ class BrowserDriver(MuseDriver):
         return idle
 
     async def renew_session(self, account: Account) -> SessionInfo:
-        info = await muse.renew_session(account.cookies)
-        # Cookies live in the account's browser context, so writing the rotated ones
-        # through any open tab updates every tab and keeps hot and warm pages alive.
         async with self._tab_cond:
             live = self._live_tabs(account)
+        jar, expires = dict(account.cookies), dict(account.cookie_expires)
         if live:
-            rotated = account.model_copy(update={
-                "cookies": {**account.cookies, **info.cookies},
-                "cookie_expires": {**account.cookie_expires, **info.cookie_expires},
+            # The session endpoint only rotates the short hatch_vml (48h). muse.ai also
+            # re-issues hatch_sess to its own page now and then, so the current value
+            # exists only in the browser context: start from it, so the saved account
+            # holds the jar the page is actually using.
+            with contextlib.suppress(CDPError, TimeoutError):
+                seen, seen_exp = await self._read_cookies(live[0].session)
+                wanted = set(jar) | set(muse.SESSION_COOKIES) | set(muse.OPTIONAL_SESSION_COOKIES)
+                for name in wanted & set(seen):
+                    jar[name] = seen[name]
+                    if name in seen_exp:
+                        expires[name] = seen_exp[name]
+        info = await muse.renew_session(jar)
+        # Write back only what the call rotated: pushing the whole saved jar would put
+        # an older login back over the one the page just received.
+        rotated = {k for k, v in info.cookies.items() if jar.get(k) != v} | set(info.cookie_expires)
+        info.cookies = {**jar, **info.cookies}
+        info.cookie_expires = {**expires, **info.cookie_expires}
+        # muse.ai ends a login 30 days after sign-in, whatever it re-issues on the way
+        # (each re-issued hatch_sess carries a fresh 30-day expiry that the server does
+        # not honour). Keep the login cookies' sign-in expiry: the dashboard shows it
+        # as the date to re-import by.
+        for name in muse.SESSION_COOKIES:
+            if name in account.cookie_expires:
+                info.cookie_expires[name] = account.cookie_expires[name]
+        # Cookies live in the account's browser context, so writing the rotated ones
+        # through any open tab updates every tab and keeps hot and warm pages alive.
+        if live:
+            if not rotated:
+                return info
+            update = account.model_copy(update={
+                "cookies": {k: info.cookies[k] for k in rotated if k in info.cookies},
+                "cookie_expires": info.cookie_expires,
             })
             with contextlib.suppress(CDPError, TimeoutError):
-                await self._set_cookies(live[0].session, rotated)
+                await self._set_cookies(live[0].session, update)
                 return info
         # Otherwise retire the account's tabs so new ones load the rotated cookies; a
         # tab in the middle of a request is closed when it is checked back in.

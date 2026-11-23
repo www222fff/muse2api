@@ -184,6 +184,14 @@ async function grabCookies() {
   return { cookies, expires: expiresMap };
 }
 
+// muse.ai ends a login 30 days after sign-in: the earlier expiry of the two login
+// cookies. hatch_vml (48h, re-issued on every renewal) is only a fallback.
+function loginExpiry(expires) {
+  const login = ["hatch_sess", "hatch_native_auth_device"]
+    .map((k) => expires[k]).filter(Boolean);
+  return login.length ? Math.min(...login) : (expires["hatch_vml"] || null);
+}
+
 // ---- main action ----
 async function run() {
   const base = normBase($("base").value);
@@ -244,7 +252,7 @@ async function run() {
     const added = (data.added && data.added[0]) || (data.account) || {};
     await saveCfg(base, key, label);
     const expTs = added.expires_at
-      || (expires["hatch_vml"] ? expires["hatch_vml"] : null);
+      || loginExpiry(expires);
     log(
       s("success", {
         label: added.label || label || s("auto"),
