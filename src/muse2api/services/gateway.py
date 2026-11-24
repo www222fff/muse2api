@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
-from typing import TypeVar
+import types
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
+from functools import wraps
+from typing import Any, TypeVar, cast
 
 from ..accounts.model import Account
 from ..accounts.pool import AccountPool, Lease
@@ -19,13 +21,60 @@ T = TypeVar("T")
 _ANONYMOUS = Account(id="anonymous", label="driver without accounts")
 
 
+_T = TypeVar("_T")
+
+
+class _AsyncContextManager(AbstractAsyncContextManager[_T]):
+    """Compact async-context-manager decorator (stdlib-compatible semantics)."""
+
+    def __init__(self, func: Callable[..., AsyncIterator[_T]], args: tuple[Any, ...],
+                 kwargs: dict[str, Any]) -> None:
+        self._func = func
+        self._args = args
+        self._kwargs = kwargs
+        self._agen: AsyncGenerator[_T, Any] | None = None
+
+    async def __aenter__(self) -> _T:
+        agen = self._func(*self._args, **self._kwargs)
+        self._agen = cast(AsyncGenerator[_T, Any], agen)
+        return await self._agen.__anext__()
+
+    async def __aexit__(self, typ: type[BaseException] | None,
+                        value: BaseException | None,
+                        traceback: types.TracebackType | None) -> bool:
+        if self._agen is None:
+            return False
+        try:
+            if typ is not None:
+                await self._agen.athrow(cast(BaseException, value))
+            else:
+                await self._agen.__anext__()
+        except StopAsyncIteration:
+            return False
+        except BaseException as exc:
+            if typ is not None and issubclass(typ, type(exc)):
+                return False
+            raise
+        return False
+
+
+def _asynccontextmanager(
+    func: Callable[..., AsyncIterator[_T]],
+) -> Callable[..., _AsyncContextManager[_T]]:
+    @wraps(func)
+    def helper(*args: Any, **kwargs: Any) -> _AsyncContextManager[_T]:
+        return _AsyncContextManager(func, args, kwargs)
+
+    return helper
+
+
 class Gateway:
     def __init__(self, pool: AccountPool, driver: MuseDriver, *, max_failover: int = 2) -> None:
         self.pool = pool
         self.driver = driver
         self.max_failover = max_failover
 
-    @asynccontextmanager
+    @_asynccontextmanager
     async def _lease(self, exclude: list[str], hint: str | None,
                      kind: str | None = None) -> AsyncIterator[Lease]:
         if not self.driver.requires_account and not self.pool.all():
@@ -52,7 +101,6 @@ class Gateway:
                     async for delta in self.driver.chat_stream(lease.account, req):
                         emitted = True
                         yield delta
-                    return
                 except UpstreamError as exc:
                     lease.fail(exc)
                     tried.append(lease.account.id)
@@ -60,6 +108,8 @@ class Gateway:
                     if emitted or not self._should_retry(exc, attempt, tried):
                         raise
                     log.warning("chat failed on %s (%s), failing over", lease.account.id, exc)
+                    continue
+                return
 
     async def _run(self, fn: Callable[[Account], Awaitable[T]], hint: str | None = None,
                    kind: str | None = None) -> T:
@@ -74,7 +124,8 @@ class Gateway:
                     if not self._should_retry(exc, attempt, tried, kind):
                         raise
                     log.warning("call failed on %s (%s), failing over", lease.account.id, exc)
-        raise AssertionError("unreachable")
+        message = "unreachable"
+        raise AssertionError(message)
 
     async def generate_image(self, req: ImageRequest) -> list[MediaResult]:
         return await self._run(lambda acc: self.driver.generate_image(acc, req))

@@ -24,8 +24,8 @@ class CDPSession:
     def __init__(self, ws: ClientConnection) -> None:
         self._ws = ws
         self._ids = itertools.count(1)
-        self._pending: dict[int, asyncio.Future] = {}
-        self._listeners: dict[str, list[Callable[[dict], None]]] = defaultdict(list)
+        self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
+        self._listeners: dict[str, list[Callable[[dict[str, Any]], None]]] = defaultdict(list)
         self._reader = asyncio.create_task(self._read_loop())
 
     @classmethod
@@ -37,24 +37,35 @@ class CDPSession:
     def closed(self) -> bool:
         return self._reader.done()
 
+    def _resolve_pending(self, msg: dict[str, Any]) -> None:
+        fut = self._pending.pop(msg["id"], None)
+        if not fut or fut.done():
+            return
+        if "error" in msg:
+            fut.set_exception(CDPError(msg["error"].get("message", "cdp error")))
+        else:
+            fut.set_result(msg.get("result", {}))
+    def _dispatch_event(self, method: str, msg: dict[str, Any]) -> None:
+        params = msg.get("params", {})
+        for cb in self._listeners.get(method, ()):
+            self._safe_callback(cb, method, params)
+
+    def _safe_callback(self, cb: Callable[[dict[str, Any]], None],
+                       method: str, params: dict[str, Any]) -> None:
+        try:
+            cb(params)
+        except Exception:
+            log.exception("cdp listener for %s failed", method)
+
     async def _read_loop(self) -> None:
         try:
             async for raw in self._ws:
-                msg = json.loads(raw)
+                msg: dict[str, Any] = json.loads(raw)
                 if "id" in msg:
-                    fut = self._pending.pop(msg["id"], None)
-                    if fut and not fut.done():
-                        if "error" in msg:
-                            fut.set_exception(CDPError(msg["error"].get("message", "cdp error")))
-                        else:
-                            fut.set_result(msg.get("result", {}))
+                    self._resolve_pending(msg)
                 elif method := msg.get("method"):
-                    for cb in self._listeners.get(method, ()):
-                        try:
-                            cb(msg.get("params", {}))
-                        except Exception:  # noqa: BLE001
-                            log.exception("cdp listener for %s failed", method)
-        except Exception as exc:  # noqa: BLE001
+                    self._dispatch_event(method, msg)
+        except Exception as exc:  # noqa: BLE001 - reader exit is logged and finalised below
             log.debug("cdp reader stopped: %s", exc)
         finally:
             for fut in self._pending.values():
@@ -62,14 +73,16 @@ class CDPSession:
                     fut.set_exception(CDPError("cdp connection closed"))
             self._pending.clear()
 
-    def on(self, method: str, callback: Callable[[dict], None]) -> None:
+    def on(self, method: str, callback: Callable[[dict[str, Any]], None]) -> None:
         self._listeners[method].append(callback)
 
-    async def send(self, method: str, params: dict | None = None, timeout: float = 30.0) -> dict:
+    async def send(self, method: str, params: dict[str, Any] | None = None,
+                   timeout: float = 30.0) -> dict[str, Any]:
         if self.closed:
-            raise CDPError("cdp connection closed")
+            message = "cdp connection closed"
+            raise CDPError(message)
         msg_id = next(self._ids)
-        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending[msg_id] = fut
         await self._ws.send(json.dumps({"id": msg_id, "method": method, "params": params or {}}))
         try:
@@ -79,7 +92,7 @@ class CDPSession:
 
     async def evaluate(self, expression: str, *, await_promise: bool = False,
                        timeout: float = 30.0) -> Any:
-        res = await self.send(
+        res: dict[str, Any] = await self.send(
             "Runtime.evaluate",
             {"expression": expression, "returnByValue": True, "awaitPromise": await_promise},
             timeout=timeout,

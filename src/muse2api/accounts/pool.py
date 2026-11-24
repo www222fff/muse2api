@@ -13,10 +13,12 @@ import asyncio
 import itertools
 import logging
 import time
+import types
 from collections import defaultdict
-from collections.abc import AsyncIterator, Iterable
-from contextlib import asynccontextmanager
-from typing import Protocol
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable
+from contextlib import AbstractAsyncContextManager
+from functools import wraps
+from typing import Any, Protocol, TypeVar, cast
 
 from ..errors import NoAccountAvailable, UpstreamAuthError, UpstreamQuotaError, UpstreamTimeout
 from .model import Account, AccountStatus
@@ -29,12 +31,14 @@ WAKE_BLOCK_SECONDS = 600
 """How long an account whose VM wake was not confirmed is skipped for video: a video
 on a VM that is not RUNNING stalls for minutes."""
 
-
 def _kind_blocked_until(acc: Account, kind: str) -> float:
-    return float((acc.meta.get("kind_blocked_until") or {}).get(kind, 0.0))
+    blocked = acc.meta.get("kind_blocked_until")
+    if isinstance(blocked, dict):
+        return float(cast(dict[str, Any], blocked).get(kind, 0.0))
+    return 0.0
 
 
-def note_wake(acc: Account, session_meta: dict) -> None:
+def note_wake(acc: Account, session_meta: dict[str, Any]) -> None:
     """Apply the VM wake outcome of one session renewal (``session_meta`` is that
     renewal's ``SessionInfo.meta``) through the per-kind block in
     ``meta["kind_blocked_until"]``: an unconfirmed wake blocks video for
@@ -44,7 +48,15 @@ def note_wake(acc: Account, session_meta: dict) -> None:
     if ok is None:  # no wake attempted this time
         return
     now = time.time()
-    blocks = {k: t for k, t in (acc.meta.get("kind_blocked_until") or {}).items() if t > now}
+    raw_blocks = acc.meta.get("kind_blocked_until")
+    if isinstance(raw_blocks, dict):
+        blocks = {
+            kind: until
+            for kind, until in cast(dict[str, Any], raw_blocks).items()
+            if until > now
+        }
+    else:
+        blocks = {}
     ours = acc.meta.pop("wake_blocked_until", None)
     if not ok:
         until = now + WAKE_BLOCK_SECONDS
@@ -67,13 +79,15 @@ class RoundRobinStrategy:
     def __init__(self) -> None:
         self._counter = itertools.count()
 
-    def choose(self, candidates: list[Account], hint: str | None) -> Account:
+    def choose(self, candidates: list[Account], hint: str | None = None) -> Account:
+        _ = hint
         ordered = sorted(candidates, key=lambda a: a.id)
         return ordered[next(self._counter) % len(ordered)]
 
 
 class LRUStrategy:
-    def choose(self, candidates: list[Account], hint: str | None) -> Account:
+    def choose(self, candidates: list[Account], hint: str | None = None) -> Account:
+        _ = hint
         return min(candidates, key=lambda a: a.last_used_at)
 
 
@@ -117,6 +131,53 @@ class Lease:
 
 
 # ---------------------------------------------------------------- pool
+_T = TypeVar("_T")
+
+
+class _AsyncContextManager(AbstractAsyncContextManager[_T]):
+    """Compact async-context-manager decorator (stdlib-compatible semantics)."""
+
+    def __init__(self, func: Callable[..., AsyncIterator[_T]], args: tuple[Any, ...],
+                 kwargs: dict[str, Any]) -> None:
+        self._func = func
+        self._args = args
+        self._kwargs = kwargs
+        self._agen: AsyncGenerator[_T, Any] | None = None
+
+    async def __aenter__(self) -> _T:
+        agen = self._func(*self._args, **self._kwargs)
+        self._agen = cast(AsyncGenerator[_T, Any], agen)
+        return await self._agen.__anext__()
+
+    async def __aexit__(self, typ: type[BaseException] | None,
+                        value: BaseException | None,
+                        traceback: types.TracebackType | None) -> bool:
+        if self._agen is None:
+            return False
+        try:
+            if typ is not None:
+                await self._agen.athrow(cast(BaseException, value))
+            else:
+                await self._agen.__anext__()
+        except StopAsyncIteration:
+            return False
+        except BaseException as exc:
+            if typ is not None and issubclass(typ, type(exc)):
+                return False
+            raise
+        return False
+
+
+def _asynccontextmanager(
+    func: Callable[..., AsyncIterator[_T]],
+) -> Callable[..., _AsyncContextManager[_T]]:
+    @wraps(func)
+    def helper(*args: Any, **kwargs: Any) -> _AsyncContextManager[_T]:
+        return _AsyncContextManager(func, args, kwargs)
+
+    return helper
+
+
 class AccountPool:
     def __init__(
         self,
@@ -186,13 +247,15 @@ class AccountPool:
         return set() if len(blocked) == len(usable) else blocked
 
     def _candidates(
-        self, exclude: Iterable[str], kind: str | None = None
+        self, exclude: Iterable[str], kind: str | None = None,
     ) -> tuple[list[Account], bool, float | None]:
         """Returns (free candidates, whether a usable account is merely busy, and the
         earliest time a cooling account comes back, if any)."""
         now = time.time()
         excluded = set(exclude) | self._kind_blocked(kind, now)
-        free, busy, back_at = [], False, None
+        free: list[Account] = []
+        busy = False
+        back_at: float | None = None
         for acc in self._accounts.values():
             if acc.id in excluded or not acc.enabled or acc.status == AccountStatus.INVALID:
                 continue
@@ -212,8 +275,33 @@ class AccountPool:
         return any(a.id not in excluded and a.enabled and a.status != AccountStatus.INVALID
                    for a in self._accounts.values())
 
+    def _reserve(self, free: list[Account], hint: str | None) -> Account:
+        acc = self.strategy.choose(free, hint)
+        self._inflight[acc.id] += 1
+        acc.last_used_at = time.time()
+        return acc
+
+    def _fail_fast(self, deadline: float, *, busy: bool, back_at: float | None) -> None:
+        remaining = deadline - time.monotonic()
+        back_in = None if back_at is None else back_at - time.time()
+        if not busy and back_in is None:
+            message = "no usable account in pool"
+            raise NoAccountAvailable(message)
+        if remaining <= 0 or (back_in is not None and not busy and back_in > remaining):
+            # Nothing frees up before the deadline; say why instead of waiting in vain.
+            reason = "busy" if busy else "cooling down"
+            message = f"all accounts are {reason}, try again later"
+            raise NoAccountAvailable(message)
+
+    def _next_wait(self, deadline: float, back_at: float | None) -> float:
+        remaining = deadline - time.monotonic()
+        back_in = None if back_at is None else back_at - time.time()
+        if back_in is None:
+            return remaining
+        return min(remaining, max(back_in, 0.05))
+
     async def acquire(
-        self, *, exclude: Iterable[str] = (), hint: str | None = None, kind: str | None = None
+        self, *, exclude: Iterable[str] = (), hint: str | None = None, kind: str | None = None,
     ) -> Account:
         exclude = tuple(exclude)
         deadline = time.monotonic() + self.acquire_timeout
@@ -221,20 +309,10 @@ class AccountPool:
             while True:
                 free, busy, back_at = self._candidates(exclude, kind)
                 if free:
-                    acc = self.strategy.choose(free, hint)
-                    self._inflight[acc.id] += 1
-                    acc.last_used_at = time.time()
-                    return acc
-                remaining = deadline - time.monotonic()
-                back_in = None if back_at is None else back_at - time.time()
-                if not busy and back_in is None:
-                    raise NoAccountAvailable("no usable account in pool")
-                if remaining <= 0 or (not busy and back_in > remaining):
-                    # Nothing frees up before the deadline; say why instead of waiting in vain.
-                    reason = "busy" if busy else "cooling down"
-                    raise NoAccountAvailable(f"all accounts are {reason}, try again later")
+                    return self._reserve(free, hint)
+                self._fail_fast(deadline, busy=busy, back_at=back_at)
                 # Wake on release, or when the soonest cooldown ends (nothing notifies that).
-                wait = remaining if back_in is None else min(remaining, max(back_in, 0.05))
+                wait = self._next_wait(deadline, back_at)
                 try:
                     await asyncio.wait_for(self._cond.wait(), timeout=wait)
                 except asyncio.TimeoutError:
@@ -271,9 +349,9 @@ class AccountPool:
             acc.status = AccountStatus.COOLING
             acc.cooldown_until = time.time() + self.cooldown
 
-    @asynccontextmanager
+    @_asynccontextmanager
     async def lease(
-        self, *, exclude: Iterable[str] = (), hint: str | None = None, kind: str | None = None
+        self, *, exclude: Iterable[str] = (), hint: str | None = None, kind: str | None = None,
     ) -> AsyncIterator[Lease]:
         acc = await self.acquire(exclude=exclude, hint=hint, kind=kind)
         lease = Lease(acc)

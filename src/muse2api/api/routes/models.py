@@ -1,4 +1,5 @@
 import time
+from typing import Any
 
 from fastapi import APIRouter, Depends
 
@@ -11,8 +12,8 @@ _CREATED = int(time.time())
 
 
 @router.get("/v1/models")
-async def list_models() -> dict:
-    data = [
+async def list_models() -> dict[str, Any]:
+    data: list[dict[str, Any]] = [
         {"id": m.id, "object": "model", "created": _CREATED, "owned_by": m.owned_by, "kind": m.kind}
         for m in MODELS.values()
     ]

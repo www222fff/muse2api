@@ -8,14 +8,17 @@ import asyncio
 import io
 import itertools
 import zipfile
+from pathlib import Path
+from typing import Any
 
 import pytest
+from fastapi.testclient import TestClient
 
 from muse2api.accounts import Account
 from muse2api.config import Settings
 from muse2api.drivers.browser import dom
 from muse2api.drivers.browser.cdp import CDPError
-from muse2api.drivers.browser.driver import AccountBusy, BrowserDriver, _Tab
+from muse2api.drivers.browser.driver import AccountBusy, BrowserDriver, Tab
 from muse2api.errors import UpstreamError
 
 parse = dom.parse_usage_text
@@ -118,7 +121,7 @@ class FakePage:
 
     async def send(self, method, params=None, **_):
         self.sent.append((method, params or {}))
-        if method == "Input.dispatchKeyEvent" and params.get("key") == "Escape" and self.closes:
+        if method == "Input.dispatchKeyEvent" and params.get("key") == "Escape" and self.closes:  # type: ignore[attr-defined]
             self.open = False
         return {}
 
@@ -134,15 +137,15 @@ ACC = Account(id="q0", cookies={"hatch_sess": "x"})
 
 
 @pytest.fixture
-def driver(tmp_path, monkeypatch) -> BrowserDriver:
-    drv = BrowserDriver(Settings(_env_file=None, data_dir=tmp_path, account_max_concurrency=2))
+def driver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    drv = BrowserDriver(Settings(_env_file=None, data_dir=tmp_path, account_max_concurrency=2))  # type: ignore[call-arg]
     ids = itertools.count()
-    drv.pages = []
+    drv.pages = []  # type: ignore[attr-defined]
 
-    async def fake_open(account: Account) -> _Tab:
+    async def fake_open(account: Account) -> Tab:
         page = FakePage()
-        drv.pages.append(page)
-        return _Tab(account.id, "ctx", f"t{next(ids)}", page)
+        drv.pages.append(page)  # type: ignore[attr-defined]
+        return Tab(account.id, "ctx", f"t{next(ids)}", page)  # type: ignore[arg-type]
 
     monkeypatch.setattr(drv, "_open_tab", fake_open)
     monkeypatch.setattr(BrowserDriver, "_QUOTA_CLICK_TIMEOUT", 0.05)
@@ -151,7 +154,7 @@ def driver(tmp_path, monkeypatch) -> BrowserDriver:
     return drv
 
 
-async def test_quota_reads_and_closes_the_dialog(driver):
+async def test_quota_reads_and_closes_the_dialog(driver: Any):
     q = await driver.quota(ACC)
     assert {k: q[k] for k in ("plan", "weekly_used_pct", "resets_at", "extra_left", "found",
                               "source")} == {
@@ -164,7 +167,7 @@ async def test_quota_reads_and_closes_the_dialog(driver):
     assert not tab.busy and not tab.stale
 
 
-async def test_quota_is_cached_until_refreshed(driver):
+async def test_quota_is_cached_until_refreshed(driver: Any):
     first = await driver.quota(ACC)
     page = driver.pages[0]
     page.dialog = EN.replace("1% used", "40% used")
@@ -173,20 +176,20 @@ async def test_quota_is_cached_until_refreshed(driver):
     assert (await driver.quota(ACC))["weekly_used_pct"] == 40
 
 
-async def test_cache_window_from_env(driver, monkeypatch):
+async def test_cache_window_from_env(driver: Any, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("MUSE2API_QUOTA_CACHE_S", "0")
     await driver.quota(ACC)
     driver.pages[0].dialog = EN.replace("1% used", "3% used")
     assert (await driver.quota(ACC))["weekly_used_pct"] == 3
 
 
-async def test_concurrent_reads_scrape_once(driver):
+async def test_concurrent_reads_scrape_once(driver: Any):
     results = await asyncio.gather(*(driver.quota(ACC) for _ in range(4)))
     assert len({r["fetched_at"] for r in results}) == 1
     assert len(driver.pages) == 1
 
 
-async def test_busy_tab_is_never_taken(driver):
+async def test_busy_tab_is_never_taken(driver: Any):
     tab = await driver._checkout(ACC)  # a request is running on the only tab
     with pytest.raises(AccountBusy) as err:
         await driver.quota(ACC)
@@ -195,15 +198,15 @@ async def test_busy_tab_is_never_taken(driver):
     assert len(driver._tabs[ACC.id]) == 1  # and no extra tab was opened next to it
 
 
-async def test_an_idle_tab_beside_a_busy_one_is_used(driver):
+async def test_an_idle_tab_beside_a_busy_one_is_used(driver: Any):
     busy = await driver._checkout(ACC)
     idle = await driver._checkout(ACC)
     await driver._checkin(idle)
     assert (await driver.quota(ACC))["found"]
-    assert busy.busy and busy.session.sent == [] and idle.session.sent
+    assert busy.busy and getattr(busy.session, "sent") == [] and getattr(idle.session, "sent")
 
 
-async def test_unknown_labels_give_found_false(driver):
+async def test_unknown_labels_give_found_false(driver: Any):
     await driver.quota(ACC)
     driver.forget_quota(ACC.id)
     driver.pages[0].dialog = "Nutzung\nKostenloser Tarif\n7 % verbraucht"
@@ -211,7 +214,7 @@ async def test_unknown_labels_give_found_false(driver):
     assert q["found"] is False and q["weekly_used_pct"] is None and not driver.pages[0].open
 
 
-async def test_missing_settings_entry_gives_found_false(driver):
+async def test_missing_settings_entry_gives_found_false(driver: Any):
     await driver.quota(ACC)
     driver.forget_quota(ACC.id)
     driver.pages[0].entry = False
@@ -219,7 +222,7 @@ async def test_missing_settings_entry_gives_found_false(driver):
     assert q["found"] is False and "settings entry" in q["error"]
 
 
-async def test_dialog_that_will_not_close_retires_the_tab(driver):
+async def test_dialog_that_will_not_close_retires_the_tab(driver: Any):
     await driver.quota(ACC)
     driver.forget_quota(ACC.id)
     page = driver.pages[0]
@@ -228,7 +231,7 @@ async def test_dialog_that_will_not_close_retires_the_tab(driver):
     assert page.closed and driver._tabs[ACC.id] == []
 
 
-async def test_browser_error_closes_the_tab_and_is_not_cached(driver):
+async def test_browser_error_closes_the_tab_and_is_not_cached(driver: Any):
     await driver.quota(ACC)
     driver.forget_quota(ACC.id)
     driver.pages[0].fail_on = "menu"
@@ -243,7 +246,7 @@ async def test_capability_flag():
 
 
 # ---------------------------------------------------------------- admin routes
-def _account(client, admin) -> str:
+def _account(client: TestClient, admin: dict[str, str]):
     r = client.post("/admin/accounts", headers=admin,
                     json={"cookies": {"hatch_sess": "secretvalue123"}})
     return r.json()["account"]["id"]
@@ -262,10 +265,10 @@ class CountingQuota:
         self.forgotten.append(account_id)
 
 
-def test_refresh_param_bypasses_the_driver_cache(client, admin, monkeypatch):
+def test_refresh_param_bypasses_the_driver_cache(client: TestClient, admin: dict[str, str], monkeypatch: pytest.MonkeyPatch):
     acc_id = _account(client, admin)
     fake = CountingQuota()
-    driver = client.app.state.services.driver
+    driver = getattr(client.app, "state").services.driver
     monkeypatch.setattr(driver, "quota", fake.quota)
     monkeypatch.setattr(driver, "forget_quota", fake.forget_quota, raising=False)
     client.get(f"/admin/accounts/{acc_id}/quota", headers=admin)
@@ -276,31 +279,31 @@ def test_refresh_param_bypasses_the_driver_cache(client, admin, monkeypatch):
     assert listed["found"] and listed["source"] == "browser" and listed["weekly_used_pct"] == 2
 
 
-def test_quota_route_maps_a_busy_account_to_409(client, admin, monkeypatch):
+def test_quota_route_maps_a_busy_account_to_409(client: TestClient, admin: dict[str, str], monkeypatch: pytest.MonkeyPatch):
     acc_id = _account(client, admin)
 
     async def busy(account):
         raise AccountBusy("busy")
 
-    monkeypatch.setattr(client.app.state.services.driver, "quota", busy)
+    monkeypatch.setattr(getattr(client.app, "state").services.driver, "quota", busy)
     r = client.get(f"/admin/accounts/{acc_id}/quota", headers=admin)
     assert r.status_code == 409 and r.json()["error"]["code"] == "account_busy"
 
 
-def test_refresh_without_a_cache_still_works(client, admin):
+def test_refresh_without_a_cache_still_works(client: TestClient, admin: dict[str, str]):
     # The mock driver has no cache and no forget_quota.
     r = client.get(f"/admin/accounts/{_account(client, admin)}/quota?refresh=1", headers=admin)
     assert r.status_code == 200
 
 
-def test_extension_zip_missing_is_404(client, admin, monkeypatch, tmp_path):
+def test_extension_zip_missing_is_404(client: TestClient, admin: dict[str, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     from muse2api.api.routes import admin as admin_routes
 
     monkeypatch.setattr(admin_routes, "EXTENSION_DIR", tmp_path / "nope")
     assert client.get("/admin/extension.zip", headers=admin).status_code == 404
 
 
-def test_extension_zip(client, admin, auth, monkeypatch, tmp_path):
+def test_extension_zip(client: TestClient, admin: dict[str, str], auth: dict[str, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     from muse2api.api.routes import admin as admin_routes
 
     ext = tmp_path / "extension"

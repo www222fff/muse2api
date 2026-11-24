@@ -37,8 +37,9 @@ class HttpDriver(MuseDriver):
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
-    async def chat_stream(self, account: Account, req: ChatRequest) -> AsyncIterator[str]:
-        raise FeatureNotImplemented("http driver chat is not implemented yet; use driver=browser")
+    async def chat_stream(self, account: Account, req: ChatRequest) -> AsyncIterator[str]:  # noqa: ARG002
+        message = "http driver chat is not implemented yet; use driver=browser"
+        raise FeatureNotImplemented(message)
         yield ""  # pragma: no cover  (makes this an async generator)
 
     async def renew_session(self, account: Account) -> SessionInfo:

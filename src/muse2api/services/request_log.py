@@ -16,9 +16,13 @@ import math
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar, cast
+
+_T = TypeVar("_T")
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +61,13 @@ CREATE INDEX IF NOT EXISTS idx_requests_task ON requests (task_id);
 # Columns added after the first release; created on open when missing.
 _ADDED_COLUMNS = {"task_status": "TEXT", "task_ms": "INTEGER"}
 
+# Row-insert SQL kept in sync with COLUMNS (static literal, no user input).
+_INSERT_SQL = (
+    "INSERT INTO requests (ts, method, path, model, key_id, key_name, account_id, "
+    "status_code, latency_ms, stream, poll, error, client_ip, user_agent, task_id) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+
 # A request failed if it got an HTTP error or its async task failed later.
 FAILED = "(status_code >= 400 OR task_status = 'failed')"
 
@@ -65,6 +76,19 @@ WINDOWS = {"1h": (3600, 60), "24h": (86400, 1800), "7d": (7 * 86400, 3 * 3600)}
 
 STATUS_CLASSES = ("2xx", "3xx", "4xx", "5xx")
 STATUS_FILTERS = (*STATUS_CLASSES, "failed")
+
+
+@dataclass(frozen=True)
+class RequestQuery:
+    """Filter bundle for ``RequestLog.query``."""
+    key_id: str | None = None
+    account_id: str | None = None
+    status: str | None = None
+    path: str | None = None
+    since: float | None = None
+    hide_polls: bool = False
+    limit: int = 100
+    offset: int = 0
 
 
 def note_account(account_id: str) -> None:
@@ -89,7 +113,7 @@ class RequestLog:
         # One connection shared by worker threads; sqlite3 objects are not thread-safe.
         self._lock = threading.Lock()
         # Outcomes of tasks that finished before their submit row was written.
-        self._early: dict[str, tuple] = {}
+        self._early: dict[str, tuple[Any, ...]] = {}
 
     def _db(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -102,18 +126,19 @@ class RequestLog:
             have = {r[1] for r in conn.execute("PRAGMA table_info(requests)")}
             for col, kind in _ADDED_COLUMNS.items():
                 if col not in have:
+                    # col/kind come only from the fixed _ADDED_COLUMNS constant.
                     conn.execute(f"ALTER TABLE requests ADD COLUMN {col} {kind}")
             self._conn = conn
         return self._conn
 
-    def _call(self, fn, *args):
+    def _call(self, fn: Callable[[sqlite3.Connection], _T], *args: Any) -> _T:
         with self._lock:
             return fn(self._db(), *args)
 
     async def open(self) -> None:
         try:
-            await asyncio.to_thread(self._call, lambda db: None)
-        except Exception:  # noqa: BLE001
+            await asyncio.to_thread(self._call, lambda _db: None)
+        except Exception:
             # Not fatal: the connection is retried on the next write.
             log.exception("failed to open request log %s", self.path)
 
@@ -130,11 +155,10 @@ class RequestLog:
     async def add(self, record: dict[str, Any]) -> None:
         record = {"stream": 0, "poll": 0, **record}
         row = tuple(record.get(c) for c in COLUMNS)
-        sql = f"INSERT INTO requests ({', '.join(COLUMNS)}) VALUES ({', '.join('?' * len(COLUMNS))})"
         task_id = None if record["poll"] else record.get("task_id")
 
         def run(db: sqlite3.Connection) -> None:
-            db.execute(sql, row)
+            db.execute(_INSERT_SQL, row)
             # Under the same lock as finish_task, so an outcome is never stashed
             # just after this row went in.
             if task_id and (early := self._early.pop(task_id, None)):
@@ -142,7 +166,7 @@ class RequestLog:
 
         try:
             await asyncio.to_thread(self._call, run)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("failed to write request log row")
 
     async def finish_task(self, task_id: str, status: str, finished_at: float,
@@ -160,19 +184,28 @@ class RequestLog:
 
         try:
             await asyncio.to_thread(self._call, run)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("failed to record outcome of task %s", task_id)
 
     async def backfill_tasks(self, tasks: list[Any]) -> None:
         """Fill in outcomes for submit rows logged before outcomes were recorded."""
-        rows = [(t.status.value, t.updated_at, (t.error or {}).get("message"), None, t.id)
-                for t in tasks if t.finished]
+        rows: list[tuple[str, float, str | None, None, str]] = []
+        for t in tasks:
+            if not t.finished:
+                continue
+            err: dict[str, Any]
+            t_error = getattr(t, "error", None)
+            if isinstance(t_error, dict):
+                err = cast(dict[str, Any], t_error)
+            else:
+                err = {}
+            rows.append((t.status.value, t.updated_at, err.get("message"), None, t.id))
         if not rows:
             return
         sql = _FINISH_SQL + " AND task_status IS NULL"
         try:
             await asyncio.to_thread(self._call, lambda db: db.executemany(sql, rows))
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("failed to backfill task outcomes")
 
     async def prune(self, retention_days: float) -> int:
@@ -180,7 +213,7 @@ class RequestLog:
         try:
             cur = await asyncio.to_thread(
                 self._call, lambda db: db.execute("DELETE FROM requests WHERE ts < ?", (cutoff,)))
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("failed to prune request log")
             return 0
         if cur.rowcount:
@@ -188,39 +221,38 @@ class RequestLog:
         return cur.rowcount
 
     # ---- reads ----
-    async def query(self, *, key_id: str | None = None, account_id: str | None = None,
-                    status: str | None = None, path: str | None = None,
-                    since: float | None = None, hide_polls: bool = False,
-                    limit: int = 100, offset: int = 0) -> dict[str, Any]:
-        where, args = ["1=1"], []
-        if key_id:
+    async def query(self, f: RequestQuery = RequestQuery()) -> dict[str, Any]:
+        where: list[str] = ["1=1"]
+        args: list[Any] = []
+        if f.key_id:
             where.append("key_id = ?")
-            args.append(key_id)
-        if account_id:
+            args.append(f.key_id)
+        if f.account_id:
             where.append("account_id = ?")
-            args.append(account_id)
-        if status == "failed":
+            args.append(f.account_id)
+        if f.status == "failed":
             where.append(FAILED)
-        elif status in STATUS_CLASSES:
-            low = int(status[0]) * 100
+        elif f.status in STATUS_CLASSES:
+            low = int(f.status[0]) * 100
             where.append("status_code >= ? AND status_code < ?")
             args += [low, low + 100]
-        if path:
+        if f.path:
             where.append("path LIKE ? ESCAPE '\\'")
-            escaped = path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            escaped = f.path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             args.append(escaped + "%")
-        if since:
+        if f.since:
             where.append("ts >= ?")
-            args.append(since)
-        if hide_polls:
+            args.append(f.since)
+        if f.hide_polls:
             where.append("poll = 0")
         cond = " AND ".join(where)
 
         def run(db: sqlite3.Connection) -> dict[str, Any]:
-            total = db.execute(f"SELECT COUNT(*) FROM requests WHERE {cond}", args).fetchone()[0]
+            # cond is assembled only from fixed fragments below with ? placeholders.
+            total = db.execute(f"SELECT COUNT(*) FROM requests WHERE {cond}", args).fetchone()[0]  # noqa: S608
             rows = db.execute(
-                f"SELECT * FROM requests WHERE {cond} ORDER BY id DESC LIMIT ? OFFSET ?",
-                [*args, limit, offset]).fetchall()
+                f"SELECT * FROM requests WHERE {cond} ORDER BY id DESC LIMIT ? OFFSET ?",  # noqa: S608
+                [*args, f.limit, f.offset]).fetchall()
             return {"data": [_row(r) for r in rows], "total": total}
 
         return await asyncio.to_thread(self._call, run)
@@ -235,22 +267,23 @@ class RequestLog:
         cond, args = "ts >= ? AND poll = 0", (start,)
 
         def grouped(db: sqlite3.Connection, cols: str) -> list[dict[str, Any]]:
+            # cols comes only from fixed internal arguments; cond is whitelisted.
             rows = db.execute(
-                f"SELECT {cols}, COUNT(*) AS count, SUM({FAILED}) AS errors "
+                f"SELECT {cols}, COUNT(*) AS count, SUM({FAILED}) AS errors "  # noqa: S608
                 f"FROM requests WHERE {cond} GROUP BY {cols} ORDER BY count DESC LIMIT 50",
                 args).fetchall()
             return [dict(r) for r in rows]
 
         def run(db: sqlite3.Connection) -> dict[str, Any]:
             total, errors, server_errors = db.execute(
-                f"SELECT COUNT(*), COALESCE(SUM({FAILED}), 0), "
+                f"SELECT COUNT(*), COALESCE(SUM({FAILED}), 0), "  # noqa: S608
                 f"COALESCE(SUM(status_code >= 500), 0) FROM requests WHERE {cond}",
                 args).fetchone()
             latencies = [r[0] for r in db.execute(
-                f"SELECT latency_ms FROM requests WHERE {cond} ORDER BY latency_ms", args)]
+                f"SELECT latency_ms FROM requests WHERE {cond} ORDER BY latency_ms", args)]  # noqa: S608
             series = [{"t": start + i * bucket, "count": 0, "errors": 0} for i in range(n_buckets)]
             for idx, count, errs in db.execute(
-                    f"SELECT CAST((ts - ?) / ? AS INTEGER) AS b, COUNT(*), "
+                    f"SELECT CAST((ts - ?) / ? AS INTEGER) AS b, COUNT(*), "  # noqa: S608
                     f"SUM({FAILED}) FROM requests WHERE {cond} GROUP BY b",
                     (start, bucket, *args)):
                 if 0 <= idx < n_buckets:
@@ -283,7 +316,7 @@ class RequestLog:
             # A bare column next to MAX() takes its value from the max row in SQLite,
             # so key_name is the name used by the key's latest request.
             rows = db.execute(
-                "SELECT key_id, key_name, MAX(ts) AS last_request_at, COUNT(*) AS total, "
+                "SELECT key_id, key_name, MAX(ts) AS last_request_at, COUNT(*) AS total, "  # noqa: S608 - static column list
                 "COALESCE(SUM(ts >= ?), 0) AS requests_24h, "
                 f"COALESCE(SUM(ts >= ? AND {FAILED}), 0) AS errors_24h "
                 "FROM requests WHERE poll = 0 AND key_id IS NOT NULL "

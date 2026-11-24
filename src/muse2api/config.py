@@ -39,11 +39,11 @@ class Settings(BaseSettings):
     # --- storage ---
     data_dir: Path = Path("data")
     request_log_retention_days: float = Field(
-        default=14, description="Days of /v1/* request history kept in data/requests.db."
+        default=14, description="Days of /v1/* request history kept in data/requests.db.",
     )
     media_retention_days: float = Field(
         default=14, description="Days generated media files are kept in data/media. "
-        "0 disables automatic cleanup."
+        "0 disables automatic cleanup.",
     )
 
     # --- upstream driver ---

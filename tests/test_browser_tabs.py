@@ -22,11 +22,11 @@ class _FakeSession:
 
 @pytest.fixture
 def driver(tmp_path, monkeypatch) -> BrowserDriver:
-    drv = BrowserDriver(Settings(_env_file=None, data_dir=tmp_path, account_max_concurrency=2))
+    drv = BrowserDriver(Settings(_env_file=None, data_dir=tmp_path, account_max_concurrency=2))  # type: ignore[call-arg]
     ids = itertools.count()
 
     async def fake_open(account: Account) -> _Tab:
-        return _Tab(account.id, "ctx", f"t{next(ids)}", _FakeSession())
+        return _Tab(account.id, "ctx", f"t{next(ids)}", _FakeSession())  # type: ignore[arg-type]
 
     monkeypatch.setattr(drv, "_open_tab", fake_open)
     return drv
@@ -159,7 +159,7 @@ def fast(monkeypatch):
 
 
 def _media_tab(states):
-    return _Tab("a0", "ctx", "t", _ScriptedSession(states))
+    return _Tab("a0", "ctx", "t", _ScriptedSession(states))  # type: ignore[arg-type]
 
 
 IMG = {"tid": "hatch-chat-attachment-presentation-1", "kind": "image", "src": "blob:x"}
@@ -176,7 +176,10 @@ async def test_text_only_reply_asks_for_the_file_once(driver, fast, monkeypatch)
 
     monkeypatch.setattr(driver, "_send", send)
     tab = _media_tab([{**DONE, "agentCount": 0}, DONE, DONE])
-    att = await driver._wait_media(tab, {"agentCount": 0, "attachments": []}, "image", 30, None, None)
+    att = await driver._wait_media(
+        tab, {"agentCount": 0, "attachments": []}, "image", 30,
+        on_progress=None, cancel=None,
+    )
     assert att == IMG
     assert len(sent) == 1 and "attach the final image" in sent[0]
 
@@ -193,7 +196,10 @@ async def test_still_text_only_after_asking_is_refused(driver, fast, monkeypatch
     monkeypatch.setattr(driver, "_send", send)
     tab = _media_tab([DONE])
     with pytest.raises(UpstreamRefused):
-        await driver._wait_media(tab, {"agentCount": 0, "attachments": []}, "image", 30, None, None)
+        await driver._wait_media(
+            tab, {"agentCount": 0, "attachments": []}, "image", 30,
+            on_progress=None, cancel=None,
+        )
     assert len(sent) == 1
 
 
@@ -201,10 +207,13 @@ async def test_timeout_is_soft_while_still_generating(driver, fast):
     busy = {"agentCount": 0, "lastText": "", "generating": True, "attachments": []}
     tab = _media_tab([busy])
     task = asyncio.create_task(
-        driver._wait_media(tab, {"agentCount": 0, "attachments": []}, "image", 0.05, None, None))
+        driver._wait_media(
+            tab, {"agentCount": 0, "attachments": []}, "image", 0.05,
+            on_progress=None, cancel=None,
+        ))
     await asyncio.sleep(0.1)  # past the timeout, but the stop button is still shown
     assert not task.done()
-    tab.session.states[:] = [{**busy, "generating": False, "agentCount": 1, "attachments": [IMG]}]
+    tab.session.states[:] = [{**busy, "generating": False, "agentCount": 1, "attachments": [IMG]}]  # type: ignore[attr-defined]
     assert await asyncio.wait_for(task, 1) == IMG
 
 
@@ -241,7 +250,7 @@ async def _run_begin_chat(driver, monkeypatch, tab, req, on_thread=True):
         return on_thread
 
     async def spy_checkout(account, prefer=None):
-        spy_checkout.prefer = prefer
+        spy_checkout.prefer = prefer  # type: ignore[attr-defined]
         return tab
 
     monkeypatch.setattr(driver, "_checkout", spy_checkout)
@@ -251,16 +260,16 @@ async def _run_begin_chat(driver, monkeypatch, tab, req, on_thread=True):
     monkeypatch.setattr(driver, "_send", fake_send)
     monkeypatch.setattr(driver, "_on_thread", fake_on)
     await driver._begin_chat(ACC, req)
-    return sent, new_thread, spy_checkout.prefer
+    return sent, new_thread, spy_checkout.prefer  # type: ignore[attr-defined]
 
 
 async def test_anonymous_chat_prefers_a_stateless_tab(driver, monkeypatch):
-    fresh = _Tab(ACC.id, "ctx", "t0", _FakeSession())
+    fresh = _Tab(ACC.id, "ctx", "t0", _FakeSession())  # type: ignore[arg-type]
     sent, _, prefer = await _run_begin_chat(
         driver, monkeypatch, fresh,
         ChatRequest(prompt="hi", model="muse-chat", turns=[("user", "hi")]),
     )
-    used = _Tab(ACC.id, "ctx", "t1", _FakeSession())
+    used = _Tab(ACC.id, "ctx", "t1", _FakeSession())  # type: ignore[arg-type]
     used.hint, used.turns = "", [("user", "hi")]
     assert prefer(used) is False
     assert prefer(fresh) is True
@@ -270,7 +279,7 @@ async def test_anonymous_chat_prefers_a_stateless_tab(driver, monkeypatch):
 async def test_anonymous_chat_never_continues_an_unowned_thread(driver, monkeypatch):
     # History lines up with the tab's thread, but with no `user` there is no
     # way to know it is the same client, so it must not continue it.
-    tab = _Tab(ACC.id, "ctx", "t0", _FakeSession())
+    tab = _Tab(ACC.id, "ctx", "t0", _FakeSession())  # type: ignore[arg-type]
     tab.hint, tab.turns = "", [("user", "hi")]
     tab.thread_url = "https://muse.ai/chat/abc"
     sent, new_thread, _ = await _run_begin_chat(
@@ -283,7 +292,7 @@ async def test_anonymous_chat_never_continues_an_unowned_thread(driver, monkeypa
 
 
 async def test_named_chat_still_continues_its_thread(driver, monkeypatch):
-    tab = _Tab(ACC.id, "ctx", "t0", _FakeSession())
+    tab = _Tab(ACC.id, "ctx", "t0", _FakeSession())  # type: ignore[arg-type]
     tab.hint, tab.turns = "alice", [("user", "hi")]
     tab.thread_url = "https://muse.ai/chat/abc"
     sent, new_thread, _ = await _run_begin_chat(
@@ -298,7 +307,7 @@ async def test_named_chat_still_continues_its_thread(driver, monkeypatch):
 async def _finish_chat(driver, fast, monkeypatch, req):
     """Run chat_stream to a finished reply on a fake thread; returns (tab, account)."""
     account = Account(id="a1", cookies={"hatch_sess": "x"})
-    tab = _Tab(account.id, "ctx", "t0", _FakeSession())
+    tab = _Tab(account.id, "ctx", "t0", _FakeSession())  # type: ignore[arg-type]
     tab.busy = True
 
     async def begin(acc, r):
@@ -333,7 +342,7 @@ async def test_named_reply_is_kept_for_the_next_turn(driver, fast, monkeypatch):
 
 
 async def test_anonymous_chat_does_not_restore_the_saved_thread(driver, monkeypatch):
-    tab = _Tab(ACC.id, "ctx", "t0", _FakeSession())
+    tab = _Tab(ACC.id, "ctx", "t0", _FakeSession())  # type: ignore[arg-type]
     account = Account(id="a2", cookies={"hatch_sess": "x"},
                       meta={"hot_page": {"hint": "k:alice", "turns": [["user", "hi"]],
                                          "url": "https://muse.ai/thread/abc", "image_count": 0}})
@@ -380,23 +389,23 @@ class _NavSession(_FakeSession):
 
 
 async def test_new_thread_uses_the_page_router_without_reloading(driver, fast):
-    tab = _Tab("a0", "ctx", "t", _NavSession(router=True))
+    tab = _Tab("a0", "ctx", "t", _NavSession(router=True))  # type: ignore[arg-type]
     tab.turns, tab.thread_url = [("user", "hi")], "https://muse.ai/thread/x"
     await driver._new_thread(tab)
-    assert tab.session.sent == []
+    assert tab.session.sent == []  # type: ignore[attr-defined]
     assert not tab.has_state
 
 
 async def test_new_thread_falls_back_to_a_full_navigation(driver, fast):
-    tab = _Tab("a0", "ctx", "t", _NavSession(router=False))
+    tab = _Tab("a0", "ctx", "t", _NavSession(router=False))  # type: ignore[arg-type]
     await driver._new_thread(tab)
-    assert tab.session.sent == ["Page.navigate"]
+    assert tab.session.sent == ["Page.navigate"]  # type: ignore[attr-defined]
 
 
 # ---- warm threads ----
 
 async def test_chat_goes_into_a_warm_thread_without_opening_one(driver, monkeypatch):
-    tab = _Tab(ACC.id, "ctx", "t0", _FakeSession())
+    tab = _Tab(ACC.id, "ctx", "t0", _FakeSession())  # type: ignore[arg-type]
     tab.warm = True
     sent, new_thread, _ = await _run_begin_chat(
         driver, monkeypatch, tab,
@@ -427,17 +436,17 @@ async def test_media_leaves_a_warm_tab_alone(driver, monkeypatch):
 
     monkeypatch.setattr(driver, "_prepare", prepare)
     with pytest.raises(RuntimeError):
-        await driver._generate(ACC, "a cat", [], "image", 1, None, None)
+        await driver._generate(ACC, "a cat", [], "image", 1, on_progress=None, cancel=None)
     assert taken and taken[0] is not warm and warm.warm
 
 
 async def test_warming_keeps_a_slot_free_for_real_requests(tmp_path, monkeypatch):
-    drv = BrowserDriver(Settings(_env_file=None, data_dir=tmp_path, account_max_concurrency=2,
+    drv = BrowserDriver(Settings(_env_file=None, data_dir=tmp_path, account_max_concurrency=2,  # type: ignore[call-arg]
                                  warm_threads=1))
     ids = itertools.count()
 
     async def fake_open(account):
-        return _Tab(account.id, "ctx", f"t{next(ids)}", _FakeSession())
+        return _Tab(account.id, "ctx", f"t{next(ids)}", _FakeSession())  # type: ignore[arg-type]
 
     monkeypatch.setattr(drv, "_open_tab", fake_open)
     busy = await drv._checkout(ACC)
@@ -456,7 +465,7 @@ class _CookieSession(_FakeSession):
 
     async def send(self, method, params=None, **_):
         if method == "Network.setCookie":
-            self.cookies[params["name"]] = params["value"]
+            self.cookies[params["name"]] = params["value"]  # type: ignore[optional-subscript]
         return {}
 
 
@@ -495,12 +504,12 @@ async def test_new_named_conversation_takes_the_warm_tab_not_a_new_one(driver):
 
 
 async def test_missing_warm_threads_are_taken_together(tmp_path, monkeypatch):
-    drv = BrowserDriver(Settings(_env_file=None, data_dir=tmp_path, account_max_concurrency=6,
+    drv = BrowserDriver(Settings(_env_file=None, data_dir=tmp_path, account_max_concurrency=6,  # type: ignore[call-arg]
                                  warm_threads=3))
     ids = itertools.count()
 
     async def fake_open(account):
-        return _Tab(account.id, "ctx", f"t{next(ids)}", _FakeSession())
+        return _Tab(account.id, "ctx", f"t{next(ids)}", _FakeSession())  # type: ignore[arg-type]
 
     monkeypatch.setattr(drv, "_open_tab", fake_open)
     batch = []
@@ -510,12 +519,12 @@ async def test_missing_warm_threads_are_taken_together(tmp_path, monkeypatch):
 
 
 async def test_a_failed_warm_round_is_retried(tmp_path, monkeypatch, fast):
-    drv = BrowserDriver(Settings(_env_file=None, data_dir=tmp_path, account_max_concurrency=4,
+    drv = BrowserDriver(Settings(_env_file=None, data_dir=tmp_path, account_max_concurrency=4,  # type: ignore[call-arg]
                                  warm_threads=1))
     ids = itertools.count()
 
     async def fake_open(account):
-        return _Tab(account.id, "ctx", f"t{next(ids)}", _FakeSession())
+        return _Tab(account.id, "ctx", f"t{next(ids)}", _FakeSession())  # type: ignore[arg-type]
 
     attempts = []
 
