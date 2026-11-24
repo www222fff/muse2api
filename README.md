@@ -345,6 +345,7 @@ All settings come from environment variables (prefix `MUSE2API_`) or a `.env` fi
 | `MUSE2API_KEEPALIVE_INTERVAL` | `600` | Seconds between keepalive rounds |
 | `MUSE2API_WAKE_CONFIRM_S` | `20` | Seconds to wait for a woken VM to report `RUNNING` |
 | `MUSE2API_QUOTA_CACHE_S` | `1800` | How long a quota reading is reused before muse.ai is asked again |
+| `MUSE2API_WORKSPACE_GROUNDING` | `0` | `1` copies local files named in a prompt (relative to the working directory) into the prompt sent to muse.ai. Any API client can then read the gateway's files, including `data/` account cookies; only enable it for a single trusted user |
 | `MUSE2API_MATTING_MODEL` | `birefnet-general` | Model for `background: "transparent"` (`birefnet-general-lite` is faster) |
 
 ## Roadmap

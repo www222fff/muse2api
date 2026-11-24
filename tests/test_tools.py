@@ -311,11 +311,23 @@ def test_fallback_tool_from_refusal_read():
     assert "log_monitor.py" in calls[0]["function"]["arguments"]
 
 
-def test_get_workspace_grounding_files():
-    messages = [
-        {"role": "user", "content": "Read the file options_trading/surveillance/log_monitor.py"},
-    ]
-    grounding = get_workspace_grounding(messages)
+_LOG_MONITOR_QUERY = [
+    {"role": "user", "content": "Read the file options_trading/surveillance/log_monitor.py"},
+]
+
+
+def test_workspace_grounding_is_off_by_default(monkeypatch):
+    monkeypatch.delenv("MUSE2API_WORKSPACE_GROUNDING", raising=False)
+    assert get_workspace_grounding(_LOG_MONITOR_QUERY) == ""
+
+
+def test_get_workspace_grounding_files(monkeypatch, tmp_path):
+    target = tmp_path / "options_trading" / "surveillance" / "log_monitor.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("print('ok')\n")
+    monkeypatch.setenv("MUSE2API_WORKSPACE_GROUNDING", "1")
+    monkeypatch.setenv("MUSE_WORKSPACE_ROOT", str(tmp_path))
+    grounding = get_workspace_grounding(_LOG_MONITOR_QUERY)
     assert "log_monitor.py" in grounding
     assert "Autonomous Agent Mode" in grounding
 

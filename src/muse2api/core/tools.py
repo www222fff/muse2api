@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import sys
 import uuid
@@ -796,7 +797,14 @@ def _is_workspace_query(query: str) -> bool:
 
 
 def get_workspace_grounding(messages: list[dict[str, Any]]) -> str:
-    """Fetch relevant local git & workspace context (files + commits) for the user query."""
+    """Fetch relevant local git & workspace context (files + commits) for the user query.
+
+    Off unless ``MUSE2API_WORKSPACE_GROUNDING=1``: it reads any file a prompt
+    names, relative to the working directory, into the prompt sent upstream,
+    so every API client could read the gateway's own data (account cookies).
+    """
+    if os.environ.get("MUSE2API_WORKSPACE_GROUNDING", "") in ("", "0"):
+        return ""
     user_query = _last_user_query(messages)
     if not user_query or not _is_workspace_query(user_query):
         return ""
