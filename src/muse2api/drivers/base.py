@@ -123,6 +123,16 @@ class MuseDriver(ABC):
     def chat_stream(self, account: Account, req: ChatRequest) -> AsyncIterator[str]:
         """Yield assistant text deltas. Implementations are async generators."""
 
+    async def chat_complete(self, account: Account, req: ChatRequest) -> str:
+        """The full reply text for a non-streaming call.
+
+        The default assembles the delta stream, which is exact for drivers
+        that yield true deltas. Drivers whose native text is a cumulative
+        snapshot override this so the reply is the final snapshot itself,
+        never a join of deltas that had to stay append-only while streaming.
+        """
+        return "".join([delta async for delta in self.chat_stream(account, req)])
+
     async def generate_image(self, account: Account, req: ImageRequest) -> list[MediaResult]:  # noqa: ARG002
         self._unsupported("image generation")
 

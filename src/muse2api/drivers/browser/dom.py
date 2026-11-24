@@ -70,6 +70,7 @@ CHAT_STATE = f"""(() => {{
   scrollers.forEach(e => {{ e.scrollTop = e.scrollHeight; }});
   const bubbles = [...document.querySelectorAll({q(AGENT_BUBBLE)})];
   const last = bubbles.length ? (bubbles[bubbles.length - 1].innerText || '').trim() : '';
+  const lastHtml = bubbles.length ? (bubbles[bubbles.length - 1].innerHTML || '') : '';
   const atts = [...document.querySelectorAll({q(ATTACHMENT)})].map(a => {{
     const v = a.querySelector('video'), i = a.querySelector('img');
     const m = v || i;
@@ -82,7 +83,7 @@ CHAT_STATE = f"""(() => {{
     }};
   }});
   const tail = document.body ? document.body.innerText.slice(-600) : '';
-  return {{ agentCount: bubbles.length, lastText: last,
+  return {{ agentCount: bubbles.length, lastText: last, lastHtml,
             generating: !!document.querySelector({q(STOP_BUTTON)}),
             approval: !!document.querySelector({q(APPROVAL_CARD)}),
             attachments: atts, tail }};

@@ -18,9 +18,11 @@ import base64
 import contextlib
 import logging
 import os
+import subprocess
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal, cast
 from urllib.parse import urlsplit
@@ -48,11 +50,24 @@ from ..base import (
     SessionInfo,
     VideoRequest,
 )
-from . import dom
+from . import dom, html_markdown
 from .cdp import CDPError, CDPSession
 from .chromium import ChromiumProcess, find_chromium
+from .html_markdown import html_to_markdown
 
 log = logging.getLogger(__name__)
+
+# Opt-in per-request tracing (MUSE2API_DEBUG_PROMPT=1): which thread a request
+# went to (new or reused), the full prompt as sent, the fill length the page
+# reported, and the bubble counts/index the reply was read from. Prompts are
+# user content already in transit; credentials are never logged.
+_DEBUG_PROMPT = os.environ.get("MUSE2API_DEBUG_PROMPT", "") not in ("", "0")
+
+
+def _prompt_debug(message: str) -> None:
+    if _DEBUG_PROMPT:
+        log.info("prompt-debug %s", message)
+
 
 POLL_INTERVAL = 0.15
 STABLE_POLLS_DONE = 4
@@ -86,6 +101,49 @@ def is_thread_url(url: str) -> bool:
     return path.startswith("/thread/") and path != "/thread/new"
 
 
+def _common_prefix(a: str, b: str) -> str:
+    limit = min(len(a), len(b))
+    i = 0
+    while i < limit and a[i] == b[i]:
+        i += 1
+    return a[:i]
+
+
+class SnapshotDeltas:
+    """Turn cumulative page snapshots into append-only stream deltas.
+
+    The page's reply text is not prefix-stable while it grows (a closing
+    code fence or ``**`` marker moves as lines are added), so a delta taken
+    straight from one snapshot can contradict the next. Only the prefix two
+    consecutive snapshots agree on is stable enough to send, and only when
+    it extends what the client already received (``sent``): a delta is
+    never emitted that is not an extension of ``sent``, so joining the
+    deltas can never duplicate or garble text. ``finish`` flushes the
+    remainder once the reply is final, or returns ``None`` when the final
+    text diverges from ``sent`` (the difference cannot be retracted).
+    """
+
+    def __init__(self) -> None:
+        self.sent = ""
+        self._previous = ""
+
+    def feed(self, current: str) -> str:
+        stable = _common_prefix(self._previous, current)
+        self._previous = current
+        if len(stable) > len(self.sent) and stable.startswith(self.sent):
+            delta = stable[len(self.sent):]
+            self.sent = stable
+            return delta
+        return ""
+
+    def finish(self, final: str) -> str | None:
+        if final.startswith(self.sent):
+            delta = final[len(self.sent):]
+            self.sent = final
+            return delta
+        return None
+
+
 @dataclass
 class Tab:
     account_id: str
@@ -111,6 +169,26 @@ class Tab:
 
 
 _Tab = Tab
+
+_DRIVER_PATH = Path(__file__).resolve()
+_HTML_MARKDOWN_PATH = Path(html_markdown.__file__).resolve()
+
+
+def _git_commit() -> str:
+    """Short commit of the checkout this code runs from; 'unknown' otherwise."""
+    for parent in Path(__file__).resolve().parents:
+        if not (parent / ".git").exists():
+            continue
+        try:
+            done = subprocess.run(
+                ["git", "-C", str(parent), "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, timeout=5, check=False)
+            if done.returncode == 0 and done.stdout.strip():
+                return done.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+        break
+    return "unknown"
 
 
 class BrowserDriver(MuseDriver):
@@ -138,10 +216,15 @@ class BrowserDriver(MuseDriver):
 
     # ------------------------------------------------------------ lifecycle
     async def startup(self) -> None:
+        # Build identity first: if a stale gateway is still running somewhere,
+        # its log shows a different commit/paths than the code just deployed.
+        log.info("browser driver build: commit=%s driver.py=%s html_markdown=%s",
+                 _git_commit(), _DRIVER_PATH, _HTML_MARKDOWN_PATH)
         exe = find_chromium(self.settings.chromium_path)
         self._chromium = ChromiumProcess(
             exe, self.settings.cdp_port, self.settings.profile_dir,
             headless=self.settings.headless, proxy=self.settings.browser_proxy,
+            data_dir=self.settings.data_dir,
         )
         ws_url = await self._chromium.start()
         self._browser = await CDPSession.connect(ws_url)
@@ -480,7 +563,10 @@ class BrowserDriver(MuseDriver):
             # A busy page can leave Runtime.evaluate unanswered while it loads; poll again.
             with contextlib.suppress(CDPError, TimeoutError):
                 state = await tab.session.evaluate(dom.PAGE_STATE, timeout=5.0) or {}
-                if state.get("ready"):
+                # Ready is not enough: the app may have redirected the
+                # navigation back to the previous thread, whose composer would
+                # silently take this request's prompt.
+                if state.get("ready") and state.get("path") == "/thread/new":
                     return
         head = (state.get("head") or "").lower()
         if any(h in head for h in dom.LOGIN_HINTS):
@@ -507,6 +593,10 @@ class BrowserDriver(MuseDriver):
         if not (res or {}).get("ok"):
             message = f"cannot fill chat input: {(res or {}).get('err')}"
             raise UpstreamError(message)
+        _prompt_debug(f"fill page_len={(res or {}).get('len')} prompt_len={len(prompt)}")
+        if (res or {}).get("len") != len(prompt):
+            log.warning("chat input holds %s chars, prompt has %s — the page "
+                        "truncated the prompt", (res or {}).get("len"), len(prompt))
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             if await tab.session.evaluate(dom.CLICK_SEND) == "clicked":
@@ -535,6 +625,17 @@ class BrowserDriver(MuseDriver):
 
     async def _state(self, tab: Tab) -> dict[str, Any]:
         state: dict[str, Any] = await tab.session.evaluate(dom.CHAT_STATE) or {}
+        # The bubble's innerText is the *rendered* text: markdown markers are
+        # lost and zero-width renderer artifacts leak in. Convert the bubble's
+        # HTML back to markdown so lastText is the reply's source form. The
+        # rendered text stays as the fallback if conversion ever fails.
+        if state.get("lastHtml"):
+            try:
+                state["lastText"] = html_to_markdown(state["lastHtml"]) \
+                    or state.get("lastText", "")
+            except Exception:  # noqa: BLE001 - polling must not die on one bad page
+                log.warning("bubble HTML to markdown failed; using rendered text",
+                            exc_info=True)
         tail = state.get("tail", "")
         hint = self._quota_hint_snippet(tail)
         if hint is None:
@@ -613,21 +714,27 @@ class BrowserDriver(MuseDriver):
         # would share one thread. Prefer a fresh/stateless tab instead.
         return await self._checkout(account, prefer=lambda t: not t.has_state)
 
-    async def _open_fresh_thread(self, tab: Tab, account: Account, hint: str) -> None:
-        """Drop any stale hot-page hint and start a new thread on ``tab``."""
+    async def _open_fresh_thread(self, tab: Tab, account: Account, hint: str) -> bool:
+        """Drop any stale hot-page hint and start a thread on ``tab``.
+
+        True when a new thread was navigated to (not a warm one)."""
         saved = account.meta.get("hot_page")
         if isinstance(saved, dict) and (cast(dict[str, Any], saved).get("hint") or "") == hint:
             account.meta.pop("hot_page", None)
         if tab.warm:
             log.info("using a warm thread")
+            _prompt_debug("thread=warm (started thread, warm-up history only)")
             self._forget(tab)
-        else:
-            log.info("opening a new thread")
-            await self._new_thread(tab)
+            return False
+        log.info("opening a new thread")
+        _prompt_debug("thread=new")
+        await self._new_thread(tab)
+        return True
 
     async def _continue_existing_thread(self, tab: Tab, follow: str,
                                         images: list[InputImage]) -> tuple[str, list[InputImage]] | None:
         """Continue the tab's thread when usable; else return None to open fresh."""
+        _prompt_debug("thread=reused (follow-up on the saved conversation)")
         if await self._on_thread(tab) or await self._live_continuation(tab):
             log.info("reusing hot page %s", tab.thread_url or "open page")
             return follow, images[tab.image_count:]
@@ -651,28 +758,52 @@ class BrowserDriver(MuseDriver):
         return await self._continue_existing_thread(tab, follow, req.images)
 
     async def _resolve_thread(self, tab: Tab, account: Account, req: ChatRequest,
-                              hint: str) -> tuple[str, list[InputImage]]:
-        """Decide whether to continue the tab's thread or open a fresh one."""
+                              hint: str) -> tuple[str, list[InputImage], bool]:
+        """Decide whether to continue the tab's thread or open a fresh one.
+
+        The flag is True when a new thread was navigated to."""
         # The saved conversation (restored after a restart) may only go into a
         # tab while no other tab of the account already holds a conversation.
         if hint and not any(t.has_state for t in self._tabs.get(account.id, []) if t is not tab):
             self._load_hot(tab, account)
         continued = await self._try_continue(tab, req, hint)
         if continued is not None:
-            return continued
+            return (*continued, False)
         # Anonymous requests never continue a thread, even if the tab happens to
         # hold one: without an identity there is no way to know it is the same
         # client, so open a new thread and send the full prompt instead.
-        await self._open_fresh_thread(tab, account, hint)
-        return req.prompt, req.images
+        fresh = await self._open_fresh_thread(tab, account, hint)
+        return req.prompt, req.images, fresh
 
     async def _begin_chat(self, account: Account, req: ChatRequest):
         """Send ``req`` on the saved conversation when it continues that page."""
         hint = req.conversation_hint or ""
         tab = await self._pick_chat_tab(account, req)
+        previous_url = ""
+        with contextlib.suppress(Exception):  # the URL only feeds a guard
+            previous_url = await self._href(tab)
+        _prompt_debug(f"begin hint={hint!r} tab_url_before={previous_url!r} "
+                      f"tab_warm={tab.warm} tab_turns={len(tab.turns)}")
         try:
-            prompt, images = await self._resolve_thread(tab, account, req, hint)
+            prompt, images, fresh = await self._resolve_thread(tab, account, req, hint)
             base = await self._state(tab)
+            if fresh and base.get("agentCount"):
+                # The navigation claimed a fresh thread but the page still
+                # shows the previous conversation: sending here would post
+                # into that thread, and polling could read its bubbles.
+                log.warning("new thread still shows %s agent bubbles; "
+                            "navigating again", base.get("agentCount"))
+                await self._new_thread(tab)
+                base = await self._state(tab)
+                if base.get("agentCount"):
+                    message = ("could not open a fresh thread: the page still "
+                               "shows the previous conversation")
+                    raise UpstreamError(message)
+            if fresh:
+                base["previousUrl"] = previous_url
+            _prompt_debug(f"base agent_count={base.get('agentCount')} "
+                          f"base_last_len={len(base.get('lastText', ''))} "
+                          f"prompt_len={len(prompt)} prompt>>>{prompt}<<<")
             await self._attach(tab, images)
             await self._send(tab, prompt)
         except CDPError as exc:
@@ -731,88 +862,109 @@ class BrowserDriver(MuseDriver):
         await self._checkin(tab)
         self.prewarm(account)
 
-    @dataclass
-    class _StreamState:
-        """Mutable polling state shared across stream iterations."""
-        base_count: int
-        base_text: str
-        started: float
-        emitted: str = ""
+    async def _reject_previous_thread(self, tab: Tab, base: dict[str, Any]) -> None:
+        """Refuse a first reply that arrived on the thread the request left."""
+        previous = base.get("previousUrl") or ""
+        if not (previous and is_thread_url(previous)):
+            return
+        current = await self._href(tab)
+        if current and (urlsplit(current).path.rstrip("/")
+                        == urlsplit(previous).path.rstrip("/")):
+            message = "the page went back to the previous thread; its reply was discarded"
+            raise UpstreamError(message)
+
+    async def _poll_reply(self, tab: Tab, base: dict[str, Any],
+                          req: ChatRequest) -> AsyncIterator[str]:
+        """Yield each new reply snapshot until the reply is finished.
+
+        Ends without a final yield when the request is cancelled; raises
+        ``UpstreamTimeout`` on timeouts and a stalled page. The caller owns
+        the tab's checkin via ``_finish_stream``.
+        """
+        base_count = base.get("agentCount", 0)
+        started = time.monotonic()
         last: str | None = None
-        stable: int = 0
-        got_first: bool = False
-
-    @staticmethod
-    def _delta_after(text: str, previous: str) -> str:
-        if not previous:
-            return text
-        if text.startswith(previous):
-            return text[len(previous):]
-        idx = text.rfind(previous)
-        if idx >= 0:
-            return text[idx + len(previous):]
-        common = 0
-        limit = min(len(text), len(previous))
-        while common < limit and text[common] == previous[common]:
-            common += 1
-        if common >= int(len(previous) * 0.5):
-            return text[common:]
-        if len(text) > len(previous):
-            return text[len(previous):]
-        return ""
-
-    async def _poll_stream(self, tab: Tab, req: ChatRequest,
-                           state: _StreamState) -> tuple[_StreamState, bool, str | None]:
-        """Poll the tab once; returns (state, finished, delta)."""
-        if req.cancel and req.cancel.is_set():
-            return state, True, None
-        elapsed = time.monotonic() - state.started
-        self._enforce_stream_deadlines(req, elapsed, got_first=state.got_first)
-        await asyncio.sleep(POLL_INTERVAL)
-        st = await self._state(tab)
-        if st.get("approval"):
-            await self._deny_approvals(tab)
-            return state, False, None
-        text = st.get("lastText", "")
-        is_new_bubble = st.get("agentCount", 0) > state.base_count
-        has_new_text = bool(text and (is_new_bubble or text != state.base_text))
-        if not has_new_text:
-            self._raise_if_stalled(elapsed, st)
-            return state, False, None
-        finished = False
-        delta = None
-        if text == state.last:
-            state.stable += 1
-            state.got_first = True
-            finished = self._stream_settled(st, state.stable)
-        else:
-            previous = state.emitted
-            state.emitted = text
-            state.last = text
-            state.stable = 0
-            state.got_first = True
-            delta = self._delta_after(text, previous)
-        return state, finished, delta
+        stable, got_first = 0, False
+        while True:
+            if req.cancel and req.cancel.is_set():
+                return
+            elapsed = time.monotonic() - started
+            self._enforce_stream_deadlines(req, elapsed, got_first=got_first)
+            await asyncio.sleep(POLL_INTERVAL)
+            st = await self._state(tab)
+            if st.get("approval"):
+                await self._deny_approvals(tab)
+                continue
+            text = st.get("lastText", "")
+            # Only a NEW bubble counts: a text change in an existing bubble
+            # is the previous reply still rendering, never this request's.
+            is_new = st.get("agentCount", 0) > base_count
+            if is_new and not got_first:
+                await self._reject_previous_thread(tab, base)
+            if not is_new or not text:
+                self._raise_if_stalled(elapsed, st)
+                continue
+            got_first = True
+            if text != last:
+                last, stable = text, 0
+                yield text
+                continue
+            stable += 1
+            if self._stream_settled(st, stable):
+                _prompt_debug(
+                    f"reply done agent_count={st.get('agentCount')} "
+                    f"bubble_index={(st.get('agentCount') or 1) - 1} "
+                    f"final_len={len(text)}")
+                _prompt_debug(
+                    f"final bubble html>>>{(st.get('lastHtml') or '')[:4000]}<<<")
+                return
 
     async def chat_stream(self, account: Account, req: ChatRequest) -> AsyncIterator[str]:
+        _prompt_debug(f"request mode=stream model={req.model} hint={req.conversation_hint!r}")
         tab, base = await self._begin_chat(account, req)
-        state = self._StreamState(
-            base_count=base.get("agentCount", 0),
-            base_text=base.get("lastText", ""),
-            started=time.monotonic(),
-        )
+        deltas = SnapshotDeltas()
+        final = ""
         finished = False
         try:
-            while True:
-                state, finished, delta = await self._poll_stream(tab, req, state)
+            async for text in self._poll_reply(tab, base, req):
+                final = text
+                delta = deltas.feed(text)
                 if delta:
                     yield delta
-                if finished:
-                    return
+            finished = not (req.cancel and req.cancel.is_set())
+            if finished:
+                tail = deltas.finish(final)
+                if tail is None:
+                    # The page replaced text the client already received; an
+                    # append-only stream cannot retract it.
+                    log.warning("final reply diverges from the streamed text "
+                                "on %s; keeping the streamed prefix",
+                                tab.thread_url or "new thread")
+                elif tail:
+                    yield tail
         except CDPError as exc:
             await self._close_tab(tab)
             message = f"browser error: {exc}"
             raise UpstreamError(message) from exc
+        finally:
+            await self._finish_stream(tab, account, req, finished=finished)
+
+    async def chat_complete(self, account: Account, req: ChatRequest) -> str:
+        """The final reply snapshot itself, not a join of streamed deltas."""
+        _prompt_debug(f"request mode=complete model={req.model} hint={req.conversation_hint!r}")
+        tab, base = await self._begin_chat(account, req)
+        final = ""
+        finished = False
+        try:
+            async for text in self._poll_reply(tab, base, req):
+                final = text
+            finished = not (req.cancel and req.cancel.is_set())
+        except CDPError as exc:
+            await self._close_tab(tab)
+            message = f"browser error: {exc}"
+            raise UpstreamError(message) from exc
+        else:
+            return final
         finally:
             await self._finish_stream(tab, account, req, finished=finished)
 

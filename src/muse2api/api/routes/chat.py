@@ -220,10 +220,9 @@ def _last_user_query_from_body(body: ChatCompletionRequest) -> str:
     return ""
 
 
-async def _non_streaming(stream: AsyncIterator[str], body: ChatCompletionRequest,
-                         flat: FlatPrompt, ids: _CompletionIds) -> dict[str, Any]:
+def _non_streaming(text: str, body: ChatCompletionRequest,
+                   flat: FlatPrompt, ids: _CompletionIds) -> dict[str, Any]:
     """Non-streaming completion, with optional tool-call reconstruction."""
-    text = "".join([d async for d in stream])
     user_q = _last_user_query_from_body(body)
     if body.tools:
         tool_calls, remaining = extract_tool_calls(
@@ -259,13 +258,13 @@ async def chat_completions(body: ChatCompletionRequest, request: Request,
     completion_id = "chatcmpl-" + uuid.uuid4().hex[:24]
     created = int(time.time())
     model_name = body.model or spec.id
-    stream = svc.gateway.chat_stream(req)
 
     ids = _CompletionIds(completion_id, created, model_name)
     if not body.stream:
-        return await _non_streaming(stream, body, flat, ids)
+        # The driver's final reply text itself, not a join of streamed deltas.
+        return _non_streaming(await svc.gateway.chat_complete(req), body, flat, ids)
 
-    return await _streaming(stream, _StreamCtx(svc, body, flat, ids, cancel))
+    return await _streaming(svc.gateway.chat_stream(req), _StreamCtx(svc, body, flat, ids, cancel))
 
 
 @dataclass(frozen=True)

@@ -157,7 +157,7 @@ def _render_blocks(turns: list[tuple[str, str]], tool_section: str,
 
     blocks.append(
         "[Instruction]\n"
-        "Continue the conversation above as the Assistant. "
+        "Continue the conversation above and reply as the Assistant to the last User message. "
         "If tool execution results are present in [Tool Result] above, formulate a comprehensive "
         "summary of the tool results for the user. Do not repeat web-sandbox disclaimers. "
         "If another tool call is needed, format it as specified. Output only the reply.",
@@ -183,10 +183,20 @@ def flatten_messages(
     tool_section = format_tools_prompt(tools) if tools else ""
     grounding_section = get_workspace_grounding(messages)
 
-    if _is_verbatim_single_turn(turns, tool_section, grounding_section):
-        return FlatPrompt(text=turns[0][1], images=images)
+    # The muse web chat has no system role, so system/developer messages are
+    # folded, in order, into a delimited block that leads the prompt; buried
+    # mid-transcript as "[System]" turns they were ignored by the model.
+    system = [text for role, text in turns if role in ("system", "developer")]
+    rest = [(role, text) for role, text in turns if role not in ("system", "developer")]
+    instructions = ""
+    if system:
+        instructions = "<system_instructions>\n" + "\n\n".join(system) + "\n</system_instructions>"
 
-    return FlatPrompt(
-        text="\n\n".join(_render_blocks(turns, tool_section, grounding_section)),
-        images=images,
-    )
+    if not rest and not tool_section and not grounding_section:
+        return FlatPrompt(text=instructions, images=images)
+
+    if _is_verbatim_single_turn(rest, tool_section, grounding_section):
+        body = rest[0][1]
+    else:
+        body = "\n\n".join(_render_blocks(rest, tool_section, grounding_section))
+    return FlatPrompt(text=f"{instructions}\n\n{body}" if instructions else body, images=images)

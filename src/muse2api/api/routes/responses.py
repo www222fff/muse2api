@@ -238,10 +238,7 @@ async def _build_response_chat(
     return req, cancel
 
 
-async def _non_streaming_response(
-    stream: AsyncIterator[str], ids: _ResponseIds, flat: FlatPrompt,
-) -> dict[str, Any]:
-    text = "".join([d async for d in stream])
+def _non_streaming_response(text: str, ids: _ResponseIds, flat: FlatPrompt) -> dict[str, Any]:
     return _response_object(ids, text, flat.text)
 
 
@@ -257,7 +254,6 @@ async def create_response(body: ResponseRequest, request: Request,
         raise InvalidRequest(message)
 
     req, cancel = await _build_response_chat(body, request, svc, flat)
-    stream = svc.gateway.chat_stream(req)
     ids = _ResponseIds(
         resp_id="resp_" + uuid.uuid4().hex[:24],
         msg_id="msg_" + uuid.uuid4().hex[:24],
@@ -266,8 +262,10 @@ async def create_response(body: ResponseRequest, request: Request,
     )
 
     if not body.stream:
-        return await _non_streaming_response(stream, ids, flat)
+        # The driver's final reply text itself, not a join of streamed deltas.
+        return _non_streaming_response(await svc.gateway.chat_complete(req), ids, flat)
 
+    stream = svc.gateway.chat_stream(req)
     ctx = _RespStreamCtx(svc, cancel, ids, flat)
 
     def streaming(first: str | None) -> StreamingResponse:
