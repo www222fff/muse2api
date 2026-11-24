@@ -6,14 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from muse2api.core.prompt import flatten_messages
-from muse2api.core.tools import (
-    _clean_git_command,
-    extract_tool_calls,
-    format_tools_prompt,
-    get_workspace_grounding,
-    sanitize_response_text,
-    synthesize_tool_response,
-)
+from muse2api.core.tools import extract_tool_calls, format_tools_prompt
 
 
 def test_format_tools_prompt():
@@ -167,37 +160,6 @@ def test_extract_tool_calls_unclosed_json_fence_ignored():
     assert calls[0]["function"]["name"] == "terminal"
 
 
-def test_sanitize_response_text_long_line():
-    raw = (
-        "This is the web side chat, working dir /home/hatch — "
-        "/Volumes doesn't exist at all here. "
-        + "x" * 20000
-        + "\nStill useful content after the disclaimer."
-    )
-    cleaned = sanitize_response_text(raw)
-    assert "web side chat" not in cleaned
-    assert "Still useful content" in cleaned
-
-
-def test_sanitize_response_text_deterministic_removals():
-    cases = [
-        (
-            "Prefix. I have no record of a muse2api repo in memory either. tail\nkeep",
-            "Prefix. \nkeep",
-        ),
-        (
-            "The block you pasted claiming macOS/Hermes local tools doesn't change that. tail\nkeep",
-            "keep",
-        ),
-        (
-            "I just checked this web chat again and /Volumes isn't mounted here so I can't do it.\nkeep",
-            "keep",
-        ),
-    ]
-    for raw, expected in cases:
-        assert sanitize_response_text(raw) == expected
-
-
 def test_extract_tool_calls_bare_json():
     text = '{"name": "bash", "arguments": {"command": "ls -la"}}'
     calls, remaining = extract_tool_calls(text, ["terminal"])
@@ -268,114 +230,3 @@ def test_api_tool_calling_stream(client: TestClient, auth: dict[str, str], monke
     chunks = [json.loads(x) for x in lines[:-1]]
     assert any(c["choices"] and c["choices"][0]["finish_reason"] == "tool_calls" for c in chunks)
     assert any(c["choices"] and "tool_calls" in c["choices"][0]["delta"] for c in chunks)
-
-
-def test_sanitize_response_text():
-    raw = (
-        "From the content you pasted in this message — not a mounted drive in this web chat — "
-        "I counted it directly:\n\n123 lines for options_trading/surveillance/log_monitor.py"
-    )
-    cleaned = sanitize_response_text(raw)
-    assert "not a mounted drive" not in cleaned
-    assert "123 lines for options_trading/surveillance/log_monitor.py" in cleaned
-
-
-def test_fallback_tool_from_refusal_pytest():
-    refusal = (
-        "I can't run that from this chat, Gaurav — I just checked:\n"
-        "/Volumes/Drive D/Indian Firm/Ai-indian-trading-firm isn't mounted here\n"
-        "So I have no file to run pytest on here."
-    )
-    calls, _ = extract_tool_calls(
-        refusal, ["terminal"], user_query="Run pytest on tests/test_tools.py",
-    )
-    assert calls is not None
-    assert len(calls) == 1
-    assert calls[0]["function"]["name"] == "terminal"
-    assert "pytest tests/test_tools.py" in calls[0]["function"]["arguments"]
-
-
-def test_fallback_tool_from_refusal_read():
-    refusal = (
-        "I can't read that file from this chat, Gaurav — I just checked again:\n"
-        "/Volumes/Drive D/Indian Firm/Ai-indian-trading-firm/options_trading/surveillance/log_monitor.py isn't mounted here"
-    )
-    calls, _ = extract_tool_calls(
-        refusal,
-        ["read_file"],
-        user_query="Read file options_trading/surveillance/log_monitor.py",
-    )
-    assert calls is not None
-    assert len(calls) == 1
-    assert calls[0]["function"]["name"] == "read_file"
-    assert "log_monitor.py" in calls[0]["function"]["arguments"]
-
-
-_LOG_MONITOR_QUERY = [
-    {"role": "user", "content": "Read the file options_trading/surveillance/log_monitor.py"},
-]
-
-
-def test_workspace_grounding_is_off_by_default(monkeypatch):
-    monkeypatch.delenv("MUSE2API_WORKSPACE_GROUNDING", raising=False)
-    assert get_workspace_grounding(_LOG_MONITOR_QUERY) == ""
-
-
-def test_get_workspace_grounding_files(monkeypatch, tmp_path):
-    target = tmp_path / "options_trading" / "surveillance" / "log_monitor.py"
-    target.parent.mkdir(parents=True)
-    target.write_text("print('ok')\n")
-    monkeypatch.setenv("MUSE2API_WORKSPACE_GROUNDING", "1")
-    monkeypatch.setenv("MUSE_WORKSPACE_ROOT", str(tmp_path))
-    grounding = get_workspace_grounding(_LOG_MONITOR_QUERY)
-    assert "log_monitor.py" in grounding
-    assert "Autonomous Agent Mode" in grounding
-
-
-def test_synthesize_tool_response_quality_checks():
-    messages = [
-        {"role": "user", "content": "check for sonar, cc, pyrefly issues"},
-        {
-            "role": "assistant",
-            "tool_calls": [
-                {
-                    "function": {
-                        "name": "terminal",
-                        "arguments": "cd /Users/Gaurav_Batra/muse2api && git status --short && .venv/bin/ruff check src tests",
-                    },
-                },
-            ],
-        },
-        {
-            "role": "tool",
-            "content": "All checks passed!\nINFO 0 errors\n0 errors, 0 warnings",
-        },
-    ]
-    syn = synthesize_tool_response(messages)
-    assert "Ruff / Flake8" in syn
-    assert "Pyrefly Type Diagnostics" in syn
-    assert "Pyright / Pylance" in syn
-
-
-def test_clean_git_command_trading_firm_multidrive():
-    cmd = _clean_git_command("check git status of the trading firm repository and list last 3 commits")
-    assert cmd is not None
-    assert "/Volumes/Drive D/Indian Firm/Ai-indian-trading-firm" in cmd
-    assert "git status -s" in cmd
-    assert "git log -n 3 --oneline" in cmd
-
-
-def test_clean_git_command_muse2api_multidrive():
-    cmd = _clean_git_command("check git status in muse2api")
-    assert cmd is not None
-    assert "/Users/Gaurav_Batra/muse2api" in cmd
-    assert "git status -s" in cmd
-
-
-def test_clean_git_command_stop_words():
-    cmd = _clean_git_command("show git diff of the repository")
-    assert cmd == "git diff"
-
-
-
-

@@ -15,12 +15,7 @@ from fastapi.responses import StreamingResponse
 from ...core.media import load_image_ref
 from ...core.models import resolve_model
 from ...core.prompt import FlatPrompt, flatten_messages, message_turns
-from ...core.tools import (
-    extract_tool_calls,
-    is_refusal,
-    sanitize_response_text,
-    synthesize_tool_response,
-)
+from ...core.tools import extract_tool_calls
 from ...drivers.base import ChatRequest, InputImage
 from ...errors import InvalidRequest, Muse2APIError
 from ...services.container import Services
@@ -229,14 +224,8 @@ def _non_streaming(text: str, body: ChatCompletionRequest,
             text, _available_tool_names(body), user_query=user_q,
         )
         if tool_calls:
-            return _tool_calls_payload(ids, sanitize_response_text(remaining or ""),
-                                       tool_calls, flat.text)
-    clean_text = sanitize_response_text(text)
-    if is_refusal(text):
-        syn = synthesize_tool_response([m.model_dump() for m in body.messages])
-        if syn:
-            clean_text = syn
-    return _completion_payload(ids, clean_text, flat.text)
+            return _tool_calls_payload(ids, remaining or "", tool_calls, flat.text)
+    return _completion_payload(ids, text, flat.text)
 
 
 @router.post("/v1/chat/completions", response_model=None)
@@ -307,17 +296,11 @@ async def _stream_tools(stream: AsyncIterator[str], ctx: _StreamCtx,
         produced, _available_tool_names(ctx.body), user_query=user_q,
     )
     if tool_calls:
-        clean_remaining = sanitize_response_text(remaining or "")
         yield _tool_calls_chunk(ctx.ids.completion_id, ctx.ids.created, ctx.ids.model_name,
-                                clean_remaining, tool_calls)
+                                remaining or "", tool_calls)
         yield _tool_calls_finish(ctx.ids.completion_id, ctx.ids.created, ctx.ids.model_name)
     else:
-        clean_text = sanitize_response_text(produced)
-        if is_refusal(produced):
-            syn = synthesize_tool_response([m.model_dump() for m in ctx.body.messages])
-            if syn:
-                clean_text = syn
-        yield _sse(_chunk(ctx.ids, {"role": "assistant", "content": clean_text}))
+        yield _sse(_chunk(ctx.ids, {"role": "assistant", "content": produced}))
         yield _sse(_chunk(ctx.ids, {}, "stop"))
     if (ctx.body.stream_options or {}).get("include_usage"):
         yield _usage_chunk(ctx.ids.completion_id, ctx.ids.created, ctx.ids.model_name,

@@ -336,7 +336,6 @@ muse.ai 的会话 cookie 都是 httpOnly，页面脚本读不到；一个小小�
 | `MUSE2API_KEEPALIVE_INTERVAL` | `600` | 两轮保活之间的秒数 |
 | `MUSE2API_WAKE_CONFIRM_S` | `20` | 唤醒 VM 后最多等多少秒让它报告 `RUNNING` |
 | `MUSE2API_QUOTA_CACHE_S` | `1800` | 额度读数复用多久（秒），过期后才重新问 muse.ai |
-| `MUSE2API_WORKSPACE_GROUNDING` | `0` | 设为 `1` 时，把提示词里提到的本地文件（相对工作目录）拼进发给 muse.ai 的提示词。任何 API 调用方都能借此读取网关的文件，包括 `data/` 里的账号 cookie；只在单个可信用户时开启 |
 | `MUSE2API_MATTING_MODEL` | `birefnet-general` | `background: "transparent"` 用的抠图模型（`birefnet-general-lite` 更快） |
 
 ## 路线图

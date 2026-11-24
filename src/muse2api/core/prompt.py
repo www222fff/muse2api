@@ -11,7 +11,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, cast
 
-from .tools import format_tools_prompt, get_workspace_grounding
+from .tools import format_tools_prompt
 
 ROLE_LABELS = {
     "system": "System",
@@ -131,25 +131,20 @@ def followup_text(previous: list[tuple[str, str]], incoming: list[tuple[str, str
     return "\n\n".join(user_text) or None
 
 
-def _is_verbatim_single_turn(turns: list[tuple[str, str]], tool_section: str,
-                              grounding_section: str) -> bool:
+def _is_verbatim_single_turn(turns: list[tuple[str, str]], tool_section: str) -> bool:
     """A lone user turn without tools or workspace context is sent verbatim."""
     return (
         len(turns) == 1
         and turns[0][0] == "user"
         and not tool_section
-        and not grounding_section
     )
 
 
-def _render_blocks(turns: list[tuple[str, str]], tool_section: str,
-                   grounding_section: str) -> list[str]:
+def _render_blocks(turns: list[tuple[str, str]], tool_section: str) -> list[str]:
     """Render the full multi-turn prompt block list."""
     blocks: list[str] = []
     if tool_section:
         blocks.append(f"[System]\n{tool_section}")
-    if grounding_section:
-        blocks.append(f"[System: Local Workspace Context]\n{grounding_section}")
 
     for role, text in turns:
         label = ROLE_LABELS.get(role, role.title())
@@ -181,7 +176,6 @@ def flatten_messages(
         return FlatPrompt(text="", images=images)
 
     tool_section = format_tools_prompt(tools) if tools else ""
-    grounding_section = get_workspace_grounding(messages)
 
     # The muse web chat has no system role, so system/developer messages are
     # folded, in order, into a delimited block that leads the prompt; buried
@@ -192,11 +186,11 @@ def flatten_messages(
     if system:
         instructions = "<system_instructions>\n" + "\n\n".join(system) + "\n</system_instructions>"
 
-    if not rest and not tool_section and not grounding_section:
+    if not rest and not tool_section:
         return FlatPrompt(text=instructions, images=images)
 
-    if _is_verbatim_single_turn(rest, tool_section, grounding_section):
+    if _is_verbatim_single_turn(rest, tool_section):
         body = rest[0][1]
     else:
-        body = "\n\n".join(_render_blocks(rest, tool_section, grounding_section))
+        body = "\n\n".join(_render_blocks(rest, tool_section))
     return FlatPrompt(text=f"{instructions}\n\n{body}" if instructions else body, images=images)
