@@ -59,7 +59,8 @@ muse2api 把 muse.ai 的聊天、文生图和文生视频能力变成标准的 O
 | 会话续期 / 保活 | 🧪 待实测 | 纯 HTTP，默认开启，每 10 分钟一次；同时唤醒账号的 VM，第一条请求不用等冷启动 |
 | 直连 HTTP 协议 driver | 🚧 预留 | 返回 501 |
 | `/v1/images/edits`（参考图） | ✅ 已实现 | 参考图用于生成新图；不支持 `mask` |
-| `/v1/responses` | 🚧 预留 | 返回 501 |
+| `/v1/responses` | ✅ 已实现 | 支持流式和非流式，事件序列与 openai SDK 一致 |
+| 函数调用（`tools`） | ✅ 仿真 | 工具定义写进提示词；回复里的调用转成 `tool_calls` 返回 |
 | 流式心跳（SSE keepalive） | ✅ 已实现 | 用 `MUSE2API_STREAM_HEARTBEAT_INTERVAL` 开启；等第一个 token 期间发送 `: keepalive` 注释 |
 | 媒体自动清理 | ✅ 已实现 | `MUSE2API_MEDIA_RETENTION_DAYS`（默认 14 天，`0` 关闭）；每小时后台清理 |
 | 服务端图片抓取的 SSRF 防护 | ✅ 已实现 | 拒绝内网和回环地址 |
@@ -288,7 +289,14 @@ curl http://localhost:18610/admin/accounts \
 | GET/POST/PATCH/DELETE | `/admin/keys[/{id}]` | 客户端 API key（创建时只返回一次明文；PATCH 改名/吊销） |
 | GET | `/admin/requests` · `/admin/stats?window=1h\|24h\|7d` | 请求日志（可按 `key_id`、`account_id`、`status=2xx\|4xx\|5xx`、`path`、`since` 过滤，`hide_polls` 隐藏轮询）· 聚合统计 |
 | GET | `/dashboard` | 网页控制台（在浏览器里输入 admin key） |
-| POST | `/v1/responses` | 预留，目前返回 501 |
+| POST | `/v1/responses` | OpenAI Responses API（流式和非流式） |
+
+> **仿真函数调用。** muse.ai 没有原生 tool calling，网关把聊天请求里的 `tools`
+> 写进提示词，要求模型用 `<tool_call>{"name": ..., "arguments": {...}}</tool_call>`
+> 或 JSON 代码块发起调用。回复里解析出的调用以 OpenAI `tool_calls` 返回，
+> `finish_reason` 为 `"tool_calls"`，流式和非流式都支持；客户端以 `role: "tool"`
+> 发回的结果会拼进下一轮提示词。模型是否发起调用由它自己决定，`tool_choice`
+> 会被忽略。带 `tools` 的流式请求要先解析完整回复，所以内容在结尾一次性返回。
 
 ### 控制台、API key 与请求日志
 
@@ -344,7 +352,7 @@ muse.ai 的会话 cookie 都是 httpOnly，页面脚本读不到；一个小小�
 
 - **验证与实测（先做）**：把测试跑通、用真实账号测浏览器 driver、验证图片/视频生成和会话续期。
 - **Driver**：直连 HTTP 协议 driver、会话复用降首字延迟、按额度调度账号。
-- **协议层**：`/v1/responses`、mask 局部重绘、仿真 tool calling。
+- **协议层**：mask 局部重绘。
 - **账号、管理与运维**：存储后端、按 key 限流、Prometheus 指标。
 
 每个任务都写了位置、做法和完成标准。代码里标了 `TODO(contributors)` 的地方是预留的扩展点。
