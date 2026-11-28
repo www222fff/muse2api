@@ -486,6 +486,56 @@ async def test_renewal_rotates_cookies_in_place_and_keeps_tabs(driver, monkeypat
     assert not tab.closed and not tab.stale and tab.warm
 
 
+class _BrowserJarSession(_CookieSession):
+    """A browser context whose page already received a newer login from muse.ai."""
+
+    def __init__(self, jar: dict[str, tuple[str, float]]) -> None:
+        super().__init__()
+        self.jar = jar
+        self.set_calls: list[str] = []
+
+    async def send(self, method, params=None, **_):
+        if method == "Network.getCookies":
+            return {"cookies": [{"name": k, "value": v, "expires": e}
+                                for k, (v, e) in self.jar.items()]}
+        if method == "Network.setCookie":
+            self.set_calls.append(params["name"])
+        return await super().send(method, params)
+
+
+async def test_renewal_saves_the_cookies_the_page_received(driver, monkeypatch):
+    from muse2api.drivers.base import SessionInfo
+    from muse2api.drivers.browser import driver as mod
+
+    acc = Account(id="a0", cookies={"hatch_sess": "old", "hatch_vml": "v1",
+                                    "hatch_native_auth_device": "d"},
+                  cookie_expires={"hatch_sess": 1000, "hatch_vml": 500})
+    sent = {}
+
+    async def renew(cookies, **_):
+        sent.update(cookies)
+        # Like muse.ai: the jar comes back whole, only hatch_vml is re-issued.
+        return SessionInfo(ok=True, cookies={**cookies, "hatch_vml": "v2"},
+                           cookie_expires={"hatch_vml": 900})
+
+    monkeypatch.setattr(mod.muse, "renew_session", renew)
+    tab = await driver._checkout(acc)
+    tab.session = _BrowserJarSession({
+        "hatch_sess": ("new", 5000.0), "hatch_vml": ("v1", 500.0),
+        "hatch_native_auth_device": ("d", -1), "unrelated": ("u", 9999.0)})
+    await driver._checkin(tab)
+
+    info = await driver.renew_session(acc)
+    assert sent["hatch_sess"] == "new"  # renewed with the page's login
+    assert info.cookies["hatch_sess"] == "new"
+    # muse.ai ends the login 30 days after sign-in, so the sign-in expiry stays.
+    assert info.cookie_expires["hatch_sess"] == 1000
+    assert info.cookie_expires["hatch_vml"] == 900
+    assert "unrelated" not in info.cookies
+    # Only the rotated cookie is written back, so the page's newer login is not overwritten.
+    assert tab.session.set_calls == ["hatch_vml"]
+
+
 async def test_new_named_conversation_takes_the_warm_tab_not_a_new_one(driver):
     warm = await driver._checkout(ACC)
     warm.warm = True

@@ -49,9 +49,12 @@ expiry.
 
 ## Cookie lifetime
 
-When present, the shortest-lived core cookie is `hatch_vml` (roughly 2 days);
-otherwise `hatch_sess` (roughly 30 days).
-Re-import (one click) when the Accounts page shows an expiry warning.
+muse.ai ends a login 30 days after sign-in, and nothing the gateway does extends
+it: the session endpoint re-issues only `hatch_vml` (2 days, renewed every
+keepalive), and the `hatch_sess` copies muse.ai re-issues later carry a fresh
+30-day expiry that the server does not honour. The Accounts page therefore shows
+the sign-in expiry of `hatch_sess` / `hatch_native_auth_device` (whichever is
+earlier). Sign in again and re-import (one click) before it runs out.
 
 ## Languages
 

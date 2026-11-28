@@ -785,7 +785,14 @@ dl.kv dd { margin: 0; overflow-wrap: anywhere; font-family: var(--mono); font-si
   function expirySection(a) {
     const exp = a.cookie_expires;
     if (!exp || !Object.keys(exp).length) return "";
-    const ts = exp["hatch_vml"] != null ? exp["hatch_vml"]
+    // muse.ai ends a login 30 days after sign-in; the login cookies keep their
+    // sign-in expiry (renewal does not move it), so the earlier of the two is the
+    // date to re-import by. hatch_vml is a 48h token re-issued on every renewal,
+    // so it always reads "2d left" and is only a fallback.
+    const login = ["hatch_sess", "hatch_native_auth_device"]
+      .map((k) => exp[k]).filter((v) => v != null);
+    const ts = login.length ? Math.min(...login)
+      : exp["hatch_vml"] != null ? exp["hatch_vml"]
       : Math.min(...Object.values(exp));
     const left = ts - now();
     const days = left / 86400;
@@ -794,7 +801,7 @@ dl.kv dd { margin: 0; overflow-wrap: anywhere; font-family: var(--mono); font-si
     else if (days < 1) { cls = "b-err"; txt = `Expires in ${Math.max(1, Math.floor(left / 3600))}h`; }
     else if (days < 3) { cls = "b-warn"; txt = `${days.toFixed(1)}d left`; }
     else { cls = "b-mute"; txt = `${Math.round(days)}d left`; }
-    return `<div class="cookie-exp" title="Cookie expires: ${esc(fullTime(ts))}">
+    return `<div class="cookie-exp" title="Login cookie expires: ${esc(fullTime(ts))}">
       <span class="badge plain ${cls}">${txt}</span>
       <span>expires ${esc(clock(ts))}</span>
     </div>`;
